@@ -92,13 +92,17 @@ function Sessions({ onError }: { onError: (value: string) => void }) {
         <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Extraction intent" />
       </div>
       <div className="stack">
-        {sessions.map((s) => (
-          <article className="row-card" key={s.id}>
-            <strong>{s.repoName}</strong><span>{s.phase}</span><span>{s.activeJobRole ?? 'No active job'}</span><span>{nextAction(s)}</span><span>{s.updatedAt}</span>
-            <button onClick={() => api.post(`/api/sessions/${s.id}/intent`, { specificFunctionality: intent, allowAgentDiscovery: true, expectedUpdatedAt: s.updatedAt }).then(load).catch((e) => onError(e.message))}>Save Intent</button>
-            <button disabled={s.phase !== 'ready_for_analysis'} onClick={() => api.post(`/api/sessions/${s.id}/analysis-jobs`, {}).then(load).catch((e) => onError(e.message))}>Queue Analysis</button>
-          </article>
-        ))}
+        {sessions.map((s) => {
+          const canSaveIntent = s.phase === 'awaiting_user_intent' || s.phase === 'needs_user_input';
+          const canQueueAnalysis = s.phase === 'ready_for_analysis';
+          return (
+            <article className="row-card" key={s.id}>
+              <strong>{s.repoName}</strong><span>{s.phase}</span><span>{s.activeJobRole ?? 'No active job'}</span><span>{nextAction(s)}</span><span>{s.updatedAt}</span>
+              <button disabled={!canSaveIntent} onClick={() => api.post(`/api/sessions/${s.id}/intent`, { specificFunctionality: intent, allowAgentDiscovery: true, expectedUpdatedAt: s.updatedAt }).then(load).catch((e) => onError(e.message))}>Save Intent</button>
+              <button disabled={!canQueueAnalysis} onClick={() => api.post(`/api/sessions/${s.id}/analysis-jobs`, {}).then(load).catch((e) => onError(e.message))}>Queue Analysis</button>
+            </article>
+          );
+        })}
       </div>
     </section>
   );
