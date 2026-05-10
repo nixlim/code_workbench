@@ -1,0 +1,17 @@
+# Repository analysis
+
+Job: {{.JobID}}
+Subject: {{.SubjectType}} {{.SubjectID}}
+
+Analyze the repository checkout at {{.WorkspaceReadRoot}}/repo. Discover reusable module candidates and emit a CandidateReport.
+
+## Output contract
+
+{{.OutputContract}}
+
+Write the final CandidateReport to {{.JobRoot}}/candidate-report.json and supporting logs/artifacts under {{.OutputRoot}}.
+
+## Safety rules
+
+{{.DeniedPathRules}}
+Read only from {{.WorkspaceReadRoot}}. Write only under {{.OutputRoot}}.

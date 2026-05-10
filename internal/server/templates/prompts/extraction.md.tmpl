@@ -1,0 +1,27 @@
+# Extraction
+
+Job: {{.JobID}}
+Subject: {{.SubjectType}} {{.SubjectID}}
+
+Use the extraction plan at {{.WorkspaceReadRoot}}/extraction-plan.json as the source of truth.
+
+## Approved candidates — extract these
+{{range .ApprovedCandidateIDs}}
+- {{.}}
+{{end}}
+{{if .RejectedCandidateIDs}}
+## Rejected candidates — do NOT operate on these
+{{range .RejectedCandidateIDs}}
+- {{.}}
+{{end}}
+{{end}}
+## Output contract
+
+{{.OutputContract}}
+
+Write extracted source, tests, manifest, config schema, docs, provenance, and status artifacts under {{.OutputRoot}}.
+
+## Safety rules
+
+{{.DeniedPathRules}}
+Read only from {{.WorkspaceReadRoot}}. Write only under {{.OutputRoot}}.

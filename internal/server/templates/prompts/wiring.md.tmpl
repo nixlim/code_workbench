@@ -1,0 +1,17 @@
+# Wiring
+
+Job: {{.JobID}}
+Subject: {{.SubjectType}} {{.SubjectID}}
+
+Read the semantic blueprint at {{.WorkspaceReadRoot}}/semantic-blueprint.json and generate local artifacts.
+
+## Output contract
+
+{{.OutputContract}}
+
+Write generated code, wiring manifest, validation notes, and logs under {{.OutputRoot}}.
+
+## Safety rules
+
+{{.DeniedPathRules}}
+Read only from {{.WorkspaceReadRoot}}. Write only under {{.OutputRoot}}.

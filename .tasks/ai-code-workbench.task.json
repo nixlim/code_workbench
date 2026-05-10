@@ -1,0 +1,881 @@
+{
+  "version": "0.1.0",
+  "types": {
+    "WorkbenchSpec": {
+      "path": "string",
+      "fr_range": "string"
+    },
+    "OpenAPISpec": {
+      "path": "string",
+      "endpoint_count": "int"
+    },
+    "GoSourceSet": {
+      "packages": "list<string>",
+      "tests": "list<string>"
+    },
+    "FrontendSourceSet": {
+      "routes": "list<string>",
+      "components": "list<string>"
+    },
+    "SQLiteSchema": {
+      "migration_paths": "list<string>",
+      "tables": "list<string>"
+    }
+  },
+  "milestones": [
+    {
+      "name": "Foundation and API Contracts",
+      "task_ids": [
+        "scaffold-local-app-runtime",
+        "create-sqlite-storage-layer",
+        "define-openapi-contract",
+        "add-config-path-safety-logging"
+      ],
+      "depends_on_milestones": []
+    },
+    {
+      "name": "Backend Workflow",
+      "task_ids": [
+        "implement-repository-session-api",
+        "implement-agent-job-scheduler",
+        "implement-claude-tmux-provider",
+        "implement-candidate-review-api",
+        "implement-extraction-plan-api",
+        "implement-module-registry"
+      ],
+      "depends_on_milestones": [
+        "Foundation and API Contracts"
+      ]
+    },
+    {
+      "name": "Blueprints and Frontend",
+      "task_ids": [
+        "implement-blueprint-api",
+        "build-repo-session-job-ui",
+        "build-candidate-module-ui",
+        "build-workbench-blueprint-ui",
+        "wire-e2e-smoke-verification"
+      ],
+      "depends_on_milestones": [
+        "Backend Workflow"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": "scaffold-local-app-runtime",
+      "task_name": "Scaffold local Go and React application runtime",
+      "goal": "The repository contains a Go 1.26.x backend and Vite React frontend that can run locally with documented developer commands.",
+      "inputs": [
+        {
+          "name": "spec",
+          "type": "WorkbenchSpec",
+          "constraints": "Includes FR-001 through FR-005 and UI technology requirements",
+          "source": "ai-code-workbench-spec.md"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "runtime-source",
+          "type": "GoSourceSet",
+          "constraints": "Go module uses Go 1.26.x and backend serves /api/* plus embedded frontend assets",
+          "destination": "go.mod, cmd/workbench, internal/server, frontend"
+        },
+        {
+          "name": "developer-commands",
+          "type": "list<string>",
+          "constraints": "Commands cover backend tests, frontend tests, all tests, dev server, and production build",
+          "destination": "Makefile or equivalent package scripts"
+        }
+      ],
+      "acceptance": [
+        "go test ./... exits 0 in the scaffolded backend packages.",
+        "The frontend dependency manifest includes TypeScript, React, React Flow, and Vite.",
+        "The production backend serves index.html for non-API non-static routes.",
+        "The development frontend proxy forwards /api/* requests to the Go backend.",
+        "One documented command runs backend tests, one runs frontend tests, one runs all tests, one starts local development, and one builds production assets."
+      ],
+      "depends_on": {
+        "status": "N/A",
+        "reason": "This is the first implementation task and only consumes the written specification."
+      },
+      "constraints": [
+        "Use Go 1.26.3 or a later Go 1.26.x patch release.",
+        "Use TypeScript, React, React Flow, and Vite for the frontend.",
+        "Run as a local single-user process with no login or remote account dependency."
+      ],
+      "files_scope": [
+        "go.mod",
+        "go.sum",
+        "cmd/workbench/**",
+        "internal/server/**",
+        "frontend/**",
+        "Makefile",
+        "README.md"
+      ],
+      "non_goals": [
+        "Multi-user authentication, hosted SaaS deployment, billing, and remote registry publishing."
+      ],
+      "priority": "critical",
+      "estimate": "medium",
+      "notes": "Covers FR-001 and FR-005 runtime scaffolding."
+    },
+    {
+      "task_id": "create-sqlite-storage-layer",
+      "task_name": "Create SQLite storage and document directories",
+      "goal": "Startup creates the SQLite database, applies DM-001 through DM-008 migrations idempotently, and creates all required local document directories.",
+      "inputs": [
+        {
+          "name": "runtime-source",
+          "type": "GoSourceSet",
+          "constraints": "Backend application entrypoint exists",
+          "source": "Project workspace after runtime scaffolding"
+        },
+        {
+          "name": "schema-requirements",
+          "type": "WorkbenchSpec",
+          "constraints": "Includes DM-001 through DM-008 and migration notes",
+          "source": "ai-code-workbench-spec.md"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "sqlite-schema",
+          "type": "SQLiteSchema",
+          "constraints": "Tables repositories, repo_sessions, candidates, extraction_plans, modules, blueprints, agent_jobs, settings exist with required constraints",
+          "destination": "internal/storage and migrations"
+        }
+      ],
+      "acceptance": [
+        "Starting with an empty data directory creates data/workbench.sqlite.",
+        "Startup creates documents, sessions, modules, blueprints, and jobs directories under the configured data directory.",
+        "Running migrations twice leaves the schema unchanged and returns no error.",
+        "The agent_jobs_one_active_role_per_subject partial unique index exists.",
+        "Unit tests verify every DM-001 through DM-008 table name and required CHECK constraint."
+      ],
+      "depends_on": [
+        "scaffold-local-app-runtime"
+      ],
+      "constraints": [
+        "Use SQLite with WAL mode, foreign keys, and a busy timeout.",
+        "SQLite rows store metadata and local filesystem paths for large generated documents."
+      ],
+      "files_scope": [
+        "internal/storage/**",
+        "internal/migrations/**",
+        "cmd/workbench/**",
+        "data/.gitignore"
+      ],
+      "error_cases": [
+        {
+          "condition": "Configured data directory is not writable",
+          "behavior": "Startup returns an error before serving HTTP",
+          "output": "Logged storage error"
+        }
+      ],
+      "priority": "critical",
+      "estimate": "medium",
+      "notes": "Covers FR-002 and FR-003."
+    },
+    {
+      "task_id": "define-openapi-contract",
+      "task_name": "Define OpenAPI contract and generated types",
+      "goal": "openapi.yaml defines every /api/* endpoint, shared schema, error body, and validation constraint required by the workbench API.",
+      "inputs": [
+        {
+          "name": "api-requirements",
+          "type": "WorkbenchSpec",
+          "constraints": "Includes Surface / API Inventory, API / Schema Contracts, and Error Contract",
+          "source": "ai-code-workbench-spec.md"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "openapi-spec",
+          "type": "OpenAPISpec",
+          "constraints": "Contains paths, operation IDs, components, request bodies, response bodies, error responses, enum values, and pagination envelopes",
+          "destination": "openapi.yaml"
+        },
+        {
+          "name": "generated-api-types",
+          "type": "GoSourceSet",
+          "constraints": "Backend validators and frontend API types are generated from or checked against openapi.yaml",
+          "destination": "internal/api/generated and frontend/src/api/generated"
+        }
+      ],
+      "acceptance": [
+        "openapi.yaml contains operations for every endpoint listed in the Surface / API Inventory.",
+        "Every error code in the Error Contract appears in an OpenAPI response component or endpoint response.",
+        "OpenAPI schemas reject unknown request fields for write endpoints.",
+        "A contract check command exits non-zero when an implemented /api/* route is absent from openapi.yaml.",
+        "Frontend API types are generated from or checked against openapi.yaml by the test command."
+      ],
+      "depends_on": [
+        "scaffold-local-app-runtime"
+      ],
+      "constraints": [
+        "openapi.yaml is the source of truth for external API request and response shapes.",
+        "Markdown prose must not become the runtime schema source."
+      ],
+      "files_scope": [
+        "openapi.yaml",
+        "internal/api/**",
+        "frontend/src/api/**",
+        "scripts/**",
+        "Makefile"
+      ],
+      "priority": "critical",
+      "estimate": "medium",
+      "notes": "Covers FR-047 and the API / Schema Contracts section."
+    },
+    {
+      "task_id": "add-config-path-safety-logging",
+      "task_name": "Add runtime config, path safety, and logs",
+      "goal": "The backend exposes health and config endpoints, enforces allowed local repository roots, rejects unsafe paths, and writes structured operational logs.",
+      "inputs": [
+        {
+          "name": "runtime-source",
+          "type": "GoSourceSet",
+          "constraints": "Backend server and storage layer exist",
+          "source": "Project workspace after foundation tasks"
+        },
+        {
+          "name": "openapi-spec",
+          "type": "OpenAPISpec",
+          "constraints": "Defines /api/health and /api/config responses",
+          "source": "OpenAPI contract"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "config-and-safety-source",
+          "type": "GoSourceSet",
+          "constraints": "Implements --data-dir, repeated --allowed-root, CODE_WORKBENCH_ALLOWED_ROOTS, safe relative path resolution, and JSON logs",
+          "destination": "internal/config, internal/paths, internal/logging, internal/server"
+        }
+      ],
+      "acceptance": [
+        "GET /api/config returns analysis limit 4, extraction limit 2, wiring limit 1, configured data directory, allowed roots, and enabled provider names.",
+        "When neither allowed-root source is set, local repository roots default to the backend startup working directory.",
+        "When the configured allowed-root source is explicitly empty, local path repository registration returns 400 path.invalid.",
+        "Path resolution rejects absolute paths, .. segments, and backslash separators before filesystem lookup.",
+        "Tests cover escaping symlinks, valid in-tree symlinks, API request logs, job lifecycle logs, and startup reconciliation logs."
+      ],
+      "depends_on": [
+        "scaffold-local-app-runtime",
+        "create-sqlite-storage-layer",
+        "define-openapi-contract"
+      ],
+      "constraints": [
+        "Use lstat and realpath containment checks for source files and artifact paths.",
+        "Do not require Postgres, Redis, hosted queues, or cloud object storage."
+      ],
+      "files_scope": [
+        "internal/config/**",
+        "internal/paths/**",
+        "internal/logging/**",
+        "internal/server/**",
+        "internal/api/**"
+      ],
+      "error_cases": [
+        {
+          "condition": "Resolved path escapes the allowed root through a symlink",
+          "behavior": "Reject the request",
+          "output": "400 path.invalid"
+        }
+      ],
+      "priority": "critical",
+      "estimate": "medium",
+      "notes": "Covers FR-004, FR-042, FR-043, FR-046, and health/config surfaces."
+    },
+    {
+      "task_id": "implement-repository-session-api",
+      "task_name": "Implement repository and session APIs",
+      "goal": "Users can register repositories, create isolated repo sessions, store extraction intent, list sessions, and read safe session source files.",
+      "inputs": [
+        {
+          "name": "storage-layer",
+          "type": "SQLiteSchema",
+          "constraints": "repositories and repo_sessions tables exist",
+          "source": "SQLite migrations"
+        },
+        {
+          "name": "openapi-spec",
+          "type": "OpenAPISpec",
+          "constraints": "Repository and session endpoints are defined",
+          "source": "OpenAPI contract"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "repository-session-source",
+          "type": "GoSourceSet",
+          "constraints": "Implements repository registration, session creation, intent persistence, phase state machine, optimistic locking, and file reads",
+          "destination": "internal/repositories, internal/sessions, internal/api"
+        }
+      ],
+      "acceptance": [
+        "POST /api/repositories accepts readable local_path repositories containing .git when the path is inside an allowed root.",
+        "POST /api/repositories rejects duplicate source_type and source_uri pairs with 409 repository.duplicate.",
+        "POST /api/sessions clones git_url repositories into data/sessions/{sessionId}/repo and removes partial checkout directories on clone failure.",
+        "POST /api/sessions/{sessionId}/intent writes the intent JSON document and changes phase to ready_for_analysis without creating an agent_jobs row.",
+        "Invalid session phase transitions return 409 session.invalid_transition and leave the row unchanged.",
+        "Conflicting expectedUpdatedAt values return 409 state.conflict.",
+        "GET /api/sessions/{sessionId}/files returns in-checkout file content and rejects path escapes with 400 path.invalid."
+      ],
+      "depends_on": [
+        "create-sqlite-storage-layer",
+        "define-openapi-contract",
+        "add-config-path-safety-logging"
+      ],
+      "constraints": [
+        "Repo analysis is scoped to one repository session at a time.",
+        "Git URLs must use https://, ssh://, or git@host:owner/repo.git syntax.",
+        "Credentials beyond the user's existing local Git configuration are not accepted."
+      ],
+      "files_scope": [
+        "internal/repositories/**",
+        "internal/sessions/**",
+        "internal/api/**",
+        "internal/storage/**",
+        "openapi.yaml"
+      ],
+      "priority": "high",
+      "estimate": "medium",
+      "notes": "Covers FR-006 through FR-010."
+    },
+    {
+      "task_id": "implement-agent-job-scheduler",
+      "task_name": "Implement agent job scheduler and prompts",
+      "goal": "Agent jobs queue idempotently, respect worker limits, render role prompts, persist lifecycle state, and reconcile interrupted work on startup.",
+      "inputs": [
+        {
+          "name": "storage-layer",
+          "type": "SQLiteSchema",
+          "constraints": "agent_jobs table and partial unique active-job index exist",
+          "source": "SQLite migrations"
+        },
+        {
+          "name": "session-api",
+          "type": "GoSourceSet",
+          "constraints": "Sessions can queue analysis work after intent is recorded",
+          "source": "Repository and session API implementation"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "scheduler-source",
+          "type": "GoSourceSet",
+          "constraints": "Implements AgentProvider interface, active-job idempotency, role concurrency, timeout handling, prompt rendering, status polling, cancel flow, and startup reconciliation",
+          "destination": "internal/agents, internal/scheduler, templates/prompts, internal/api"
+        }
+      ],
+      "acceptance": [
+        "Queueing an already-active role, subjectType, and subjectId returns 200 with the existing job ID and creates no second active row.",
+        "Queueing a new job returns 202 and stores a prompt file at data/jobs/{jobId}/prompt.md before the provider starts.",
+        "The scheduler runs at most 4 analysis jobs, 2 extraction jobs, and 1 wiring job concurrently.",
+        "Jobs that exceed timeout_seconds become failed with error_code job.timeout.",
+        "Startup marks orphaned running jobs failed with error_code job.interrupted when the provider cannot prove the tmux process is active.",
+        "Unit tests exercise a fake AgentProvider without changing API request shapes or database schema."
+      ],
+      "depends_on": [
+        "create-sqlite-storage-layer",
+        "implement-repository-session-api"
+      ],
+      "constraints": [
+        "Agent prompts must be rendered with Go text/template from templates/prompts/{role}.md.tmpl.",
+        "The provider interface must define Start, Open, Cancel, and Status methods."
+      ],
+      "files_scope": [
+        "internal/agents/**",
+        "internal/scheduler/**",
+        "templates/prompts/**",
+        "internal/api/**",
+        "internal/storage/**"
+      ],
+      "error_cases": [
+        {
+          "condition": "Worker capacity is exhausted",
+          "behavior": "Leave the job queued",
+          "output": "Queued job starts when capacity becomes available"
+        }
+      ],
+      "priority": "high",
+      "estimate": "medium",
+      "notes": "Covers FR-011, FR-014, FR-015, FR-016, FR-044, and FR-045 scheduler behavior."
+    },
+    {
+      "task_id": "implement-claude-tmux-provider",
+      "task_name": "Implement Claude Code tmux provider",
+      "goal": "The first AgentProvider launches Claude Code CLI in an isolated tmux session and exposes safe open and cancel controls.",
+      "inputs": [
+        {
+          "name": "scheduler-source",
+          "type": "GoSourceSet",
+          "constraints": "AgentProvider interface and job workspace conventions exist",
+          "source": "Agent job scheduler implementation"
+        },
+        {
+          "name": "provider-requirements",
+          "type": "WorkbenchSpec",
+          "constraints": "Includes FR-012 through FR-013 provider command, environment, sandbox, and timeout rules",
+          "source": "ai-code-workbench-spec.md"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "claude-provider-source",
+          "type": "GoSourceSet",
+          "constraints": "Starts Claude Code with required flags, env allowlist, tmux session naming, isolated cwd, denied paths, writable output root, and attach command response",
+          "destination": "internal/agents/claude, internal/api"
+        }
+      ],
+      "acceptance": [
+        "A started job persists agent_jobs.tmux_session_name before Open returns an attach command.",
+        "The provider invokes Claude Code with --bare, --permission-mode acceptEdits, the required allowedTools list, and disallowed WebFetch and WebSearch tools.",
+        "The provider sets HOME to data/jobs/{jobId}/home and only passes PATH, HOME, TMPDIR, SHELL, TERM, and Workbench job variables.",
+        "The provider rejects any produced artifact whose realpath is outside the allowed output root before marking a job succeeded.",
+        "POST /api/agent-jobs/{jobId}/open returns 409 agent_job.not_running for jobs with no active tmux session.",
+        "Provider tests verify command construction, environment filtering, attach command response, and cancel behavior with tmux execution mocked."
+      ],
+      "depends_on": [
+        "implement-agent-job-scheduler"
+      ],
+      "constraints": [
+        "Do not use --add-dir outside the job workspace.",
+        "Apply an OS-level filesystem sandbox or equivalent wrapper that denies writes outside the writable output root before the process starts."
+      ],
+      "files_scope": [
+        "internal/agents/claude/**",
+        "internal/agents/**",
+        "internal/api/**",
+        "internal/paths/**"
+      ],
+      "priority": "high",
+      "estimate": "medium",
+      "notes": "Covers FR-012 and FR-013."
+    },
+    {
+      "task_id": "implement-candidate-review-api",
+      "task_name": "Implement candidate import and review APIs",
+      "goal": "Successful analysis jobs import session-scoped candidates and users can modify, approve, reject, defer, rescan, duplicate, and view candidate source safely.",
+      "inputs": [
+        {
+          "name": "scheduler-source",
+          "type": "GoSourceSet",
+          "constraints": "Analysis job completion can trigger output import",
+          "source": "Agent scheduler and provider implementation"
+        },
+        {
+          "name": "candidate-contract",
+          "type": "OpenAPISpec",
+          "constraints": "Defines CandidateReport and candidate action schemas",
+          "source": "OpenAPI contract"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "candidate-source",
+          "type": "GoSourceSet",
+          "constraints": "Implements CandidateReport import, namespaced candidate IDs, candidate state machine, reason validation, and source file view integration",
+          "destination": "internal/candidates, internal/api"
+        }
+      ],
+      "acceptance": [
+        "A succeeded repo_analysis job imports data/jobs/{jobId}/candidate-report.json transactionally.",
+        "Every imported candidate ID matches {sessionId}.cand.NNN.",
+        "Import rejects a candidate missing proposed ports with 422 candidate_report.invalid and persists no partial row for that candidate.",
+        "Approve, reject, defer, and duplicate actions require a reason with at least 3 non-whitespace characters.",
+        "PATCH /api/candidates/{candidateId} returns 409 candidate.invalid_transition for an approved candidate and leaves the row unchanged.",
+        "Candidate source viewing reads through GET /api/sessions/{sessionId}/files and never exposes arbitrary filesystem paths."
+      ],
+      "depends_on": [
+        "implement-repository-session-api",
+        "implement-agent-job-scheduler"
+      ],
+      "constraints": [
+        "No extraction job may start until the relevant candidate is explicitly approved by the user.",
+        "Candidate IDs are namespaced by session ID."
+      ],
+      "files_scope": [
+        "internal/candidates/**",
+        "internal/api/**",
+        "internal/storage/**",
+        "openapi.yaml"
+      ],
+      "priority": "high",
+      "estimate": "medium",
+      "notes": "Covers FR-017 through FR-022."
+    },
+    {
+      "task_id": "implement-extraction-plan-api",
+      "task_name": "Implement extraction plan APIs",
+      "goal": "Extraction plans are created only from approved candidates and extraction jobs operate only on candidates listed in the plan document.",
+      "inputs": [
+        {
+          "name": "candidate-source",
+          "type": "GoSourceSet",
+          "constraints": "Candidate statuses and approval reasons are persisted",
+          "source": "Candidate review API implementation"
+        },
+        {
+          "name": "scheduler-source",
+          "type": "GoSourceSet",
+          "constraints": "Extraction jobs can be queued through the job scheduler",
+          "source": "Agent job scheduler implementation"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "extraction-plan-source",
+          "type": "GoSourceSet",
+          "constraints": "Implements extraction plan creation, approved-candidate checks, provenance exclusions, plan document persistence, and extraction job queueing",
+          "destination": "internal/extraction, internal/api, templates/prompts/extraction.md.tmpl"
+        }
+      ],
+      "acceptance": [
+        "POST /api/extraction-plans with only approved candidate IDs returns 201 and writes a plan document.",
+        "POST /api/extraction-plans with any unapproved candidate ID returns 409 candidate.not_approved.",
+        "Rejected candidate IDs are stored in the plan only as provenance exclusions.",
+        "Extraction prompt rendering includes approved candidate IDs and excludes rejected candidate IDs from work instructions.",
+        "POST /api/extraction-plans/{planId}/jobs queues an extraction job that reads the plan document as its source of truth."
+      ],
+      "depends_on": [
+        "implement-candidate-review-api",
+        "implement-agent-job-scheduler"
+      ],
+      "constraints": [
+        "Extraction jobs must not operate on rejected candidate IDs.",
+        "Extraction jobs must use the extraction plan document as the source of truth."
+      ],
+      "files_scope": [
+        "internal/extraction/**",
+        "internal/api/**",
+        "templates/prompts/extraction.md.tmpl",
+        "openapi.yaml"
+      ],
+      "priority": "high",
+      "estimate": "medium",
+      "notes": "Covers FR-023 and FR-024."
+    },
+    {
+      "task_id": "implement-module-registry",
+      "task_name": "Implement module registry and comparison",
+      "goal": "Complete passing extraction outputs register as versioned modules and available modules appear in the workbench palette with duplicate classification support.",
+      "inputs": [
+        {
+          "name": "extraction-plan-source",
+          "type": "GoSourceSet",
+          "constraints": "Extraction job outputs are linked from agent_jobs",
+          "source": "Extraction plan API implementation"
+        },
+        {
+          "name": "module-contract",
+          "type": "OpenAPISpec",
+          "constraints": "Defines ModuleManifest, registry comparison report, and workbench palette schemas",
+          "source": "OpenAPI contract"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "module-registry-source",
+          "type": "GoSourceSet",
+          "constraints": "Implements module registration, semver minor increments, manifest and schema validation, test_status gating, palette listing, and comparison classifications",
+          "destination": "internal/modules, internal/registry, internal/api"
+        }
+      ],
+      "acceptance": [
+        "A module is not registered unless source code, tests, manifest, typed ports, configuration schema, provenance metadata, docs, semver version, and test status are present.",
+        "The first successful extraction of a candidate registers version 0.1.0.",
+        "A later successful re-extraction of the same candidate registers the next minor version and does not replace the existing module row.",
+        "available_in_workbench is 1 only when test_status is passing and manifest, ports, and config schema parse successfully.",
+        "GET /api/workbench/palette lists only available modules and selects the highest semver version for duplicate module names.",
+        "POST /api/modules/{moduleId}/compare returns exactly one classification from new_module, duplicate, variant, adapter_needed, merge_candidate, or reject_duplicate using the spec thresholds."
+      ],
+      "depends_on": [
+        "implement-extraction-plan-api"
+      ],
+      "constraints": [
+        "Go modules are the default extraction output target unless the approved candidate specifies another target language.",
+        "Manifest, ports, and config schema must parse before workbench availability is set."
+      ],
+      "files_scope": [
+        "internal/modules/**",
+        "internal/registry/**",
+        "internal/api/**",
+        "internal/storage/**",
+        "openapi.yaml"
+      ],
+      "priority": "high",
+      "estimate": "medium",
+      "notes": "Covers FR-025 through FR-029."
+    },
+    {
+      "task_id": "implement-blueprint-api",
+      "task_name": "Implement blueprint validation and wiring APIs",
+      "goal": "Blueprint APIs store semantic documents separately from flow layouts, validate typed module graphs, and queue wiring jobs only for valid blueprints.",
+      "inputs": [
+        {
+          "name": "module-registry-source",
+          "type": "GoSourceSet",
+          "constraints": "Available modules expose typed ports and palette definitions",
+          "source": "Module registry implementation"
+        },
+        {
+          "name": "scheduler-source",
+          "type": "GoSourceSet",
+          "constraints": "Wiring jobs can be queued with role-specific output roots",
+          "source": "Agent job scheduler implementation"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "blueprint-source",
+          "type": "GoSourceSet",
+          "constraints": "Implements blueprint create/list/get/update, semantic validation, port compatibility, separate flow layout persistence, and wiring job queueing",
+          "destination": "internal/blueprints, internal/api, templates/prompts/wiring.md.tmpl"
+        }
+      ],
+      "acceptance": [
+        "Saving a blueprint writes a semantic document path and a separate flow layout path.",
+        "Validation rejects duplicate node IDs, missing module references, missing required input connections, invalid required config values, invalid target language, invalid output kind, and invalid package name.",
+        "Connecting an output port to an input port with a different trimmed type string returns 422 blueprint.port_type_mismatch.",
+        "A blueprint with validation_status invalid returns 409 blueprint.invalid when a wiring job is queued.",
+        "A blueprint with validation_status valid queues one active wiring job and writes generated artifacts under data/blueprints/{blueprintId}/generated/{jobId} when the job succeeds."
+      ],
+      "depends_on": [
+        "implement-module-registry",
+        "implement-agent-job-scheduler"
+      ],
+      "constraints": [
+        "Port name matching uses ^[a-z][a-z0-9_]{0,63}$.",
+        "Port type comparison is case-sensitive exact string equality after trimming ASCII whitespace.",
+        "React Flow layout state is never embedded in the semantic blueprint document."
+      ],
+      "files_scope": [
+        "internal/blueprints/**",
+        "internal/api/**",
+        "templates/prompts/wiring.md.tmpl",
+        "openapi.yaml"
+      ],
+      "priority": "high",
+      "estimate": "medium",
+      "notes": "Covers FR-030 through FR-035."
+    },
+    {
+      "task_id": "build-repo-session-job-ui",
+      "task_name": "Build repositories, sessions, and jobs UI",
+      "goal": "The frontend renders repository registration, session lifecycle, intent capture, and agent job monitoring screens using the generated API types.",
+      "inputs": [
+        {
+          "name": "repository-session-source",
+          "type": "GoSourceSet",
+          "constraints": "Repository and session APIs are implemented",
+          "source": "Repository and session API implementation"
+        },
+        {
+          "name": "scheduler-source",
+          "type": "GoSourceSet",
+          "constraints": "Agent job APIs are implemented",
+          "source": "Agent job scheduler implementation"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "repo-session-job-ui",
+          "type": "FrontendSourceSet",
+          "constraints": "Contains Repositories, Sessions, and Agent Jobs screens with typed API client integration",
+          "destination": "frontend/src"
+        }
+      ],
+      "acceptance": [
+        "The Repositories screen can submit local_path and git_url registration requests and display duplicate repository errors.",
+        "The Sessions screen shows repo name, session phase, active job role, timestamps, and next action for each session.",
+        "The session detail flow records extraction intent before the analysis queue action becomes available.",
+        "The Agent Jobs screen shows queued, running, succeeded, failed, and cancelled jobs with provider, role, subject, tmux session name, timestamps, open action, and cancel action.",
+        "Visible running jobs are polled through GET /api/agent-jobs/{jobId} every 5 seconds."
+      ],
+      "depends_on": [
+        "implement-repository-session-api",
+        "implement-agent-job-scheduler",
+        "define-openapi-contract"
+      ],
+      "constraints": [
+        "Use generated or checked frontend API types from openapi.yaml.",
+        "No authentication UI is added."
+      ],
+      "files_scope": [
+        "frontend/src/api/**",
+        "frontend/src/routes/**",
+        "frontend/src/components/**",
+        "frontend/src/app/**"
+      ],
+      "priority": "medium",
+      "estimate": "medium",
+      "notes": "Covers FR-036, FR-037, and FR-041 for the operational screens."
+    },
+    {
+      "task_id": "build-candidate-module-ui",
+      "task_name": "Build candidate review and module registry UI",
+      "goal": "The frontend renders candidate review and module registry screens with all required filters, fields, and candidate actions.",
+      "inputs": [
+        {
+          "name": "candidate-source",
+          "type": "GoSourceSet",
+          "constraints": "Candidate APIs are implemented",
+          "source": "Candidate review API implementation"
+        },
+        {
+          "name": "module-registry-source",
+          "type": "GoSourceSet",
+          "constraints": "Module APIs are implemented",
+          "source": "Module registry implementation"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "candidate-module-ui",
+          "type": "FrontendSourceSet",
+          "constraints": "Contains Candidates and Modules screens with typed API client integration",
+          "destination": "frontend/src"
+        }
+      ],
+      "acceptance": [
+        "The Candidates screen groups candidates by repo session.",
+        "Candidate filters cover session, repo, status, risk, confidence, and capability.",
+        "Candidate actions include approve, reject, modify, defer, request rescan, mark duplicate, and view source.",
+        "Reason-required candidate actions display the backend error when the reason has fewer than 3 non-whitespace characters.",
+        "The Modules screen shows name, version, source repo, source candidate, language, kind, capabilities, ports, test status, docs path, and workbench availability.",
+        "The Modules screen can trigger registry comparison and display the returned classification."
+      ],
+      "depends_on": [
+        "implement-candidate-review-api",
+        "implement-module-registry",
+        "define-openapi-contract"
+      ],
+      "constraints": [
+        "Candidate source viewing must call the session file endpoint rather than using arbitrary filesystem paths.",
+        "The UI must not allow extraction plan creation from unapproved candidates."
+      ],
+      "files_scope": [
+        "frontend/src/api/**",
+        "frontend/src/routes/**",
+        "frontend/src/components/**"
+      ],
+      "priority": "medium",
+      "estimate": "medium",
+      "notes": "Covers FR-038 and FR-039."
+    },
+    {
+      "task_id": "build-workbench-blueprint-ui",
+      "task_name": "Build React Flow workbench and blueprint UI",
+      "goal": "The frontend provides a React Flow workbench that composes registered modules, validates blueprints, saves flow layout separately, and queues wiring jobs.",
+      "inputs": [
+        {
+          "name": "module-registry-source",
+          "type": "GoSourceSet",
+          "constraints": "Workbench palette endpoint lists available modules",
+          "source": "Module registry implementation"
+        },
+        {
+          "name": "blueprint-source",
+          "type": "GoSourceSet",
+          "constraints": "Blueprint APIs and wiring job queueing are implemented",
+          "source": "Blueprint API implementation"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "workbench-blueprint-ui",
+          "type": "FrontendSourceSet",
+          "constraints": "Contains Workbench and Blueprints screens with React Flow canvas, palette, inspector, validation, save, and generate code controls",
+          "destination": "frontend/src"
+        }
+      ],
+      "acceptance": [
+        "The Workbench screen lists available modules from GET /api/workbench/palette as draggable node definitions.",
+        "Workbench nodes show required and optional typed input ports and typed output ports from module manifests.",
+        "Creating an incompatible edge displays the 422 blueprint.port_type_mismatch response and does not persist the edge.",
+        "Saving a blueprint sends separate semantic document and flow layout payloads to the backend.",
+        "The Workbench screen provides module palette, React Flow canvas, inspector, validation status, save action, validate action, and generate code action.",
+        "The Blueprints screen lists saved blueprints and can open validation reports and wiring job status."
+      ],
+      "depends_on": [
+        "implement-module-registry",
+        "implement-blueprint-api",
+        "define-openapi-contract"
+      ],
+      "constraints": [
+        "Use React Flow for graph composition.",
+        "Do not embed authentication flows or remote account dependencies."
+      ],
+      "files_scope": [
+        "frontend/src/api/**",
+        "frontend/src/routes/**",
+        "frontend/src/components/workbench/**",
+        "frontend/src/components/blueprints/**"
+      ],
+      "priority": "medium",
+      "estimate": "medium",
+      "notes": "Covers FR-040 and blueprint UI portions of FR-036."
+    },
+    {
+      "task_id": "wire-e2e-smoke-verification",
+      "task_name": "Wire end-to-end smoke verification",
+      "goal": "The local test suite verifies the complete repository-to-candidate-to-module-to-blueprint-to-wiring smoke path without authentication.",
+      "inputs": [
+        {
+          "name": "backend-source",
+          "type": "GoSourceSet",
+          "constraints": "Backend APIs for sessions, candidates, modules, blueprints, jobs, storage, and safety are implemented",
+          "source": "Completed backend workflow implementation"
+        },
+        {
+          "name": "frontend-source",
+          "type": "FrontendSourceSet",
+          "constraints": "All seven primary UI screens are implemented",
+          "source": "Completed frontend implementation"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "verification-suite",
+          "type": "list<string>",
+          "constraints": "Commands include backend unit tests, frontend tests, integration tests, OpenAPI drift check, and E2E smoke flow",
+          "destination": "tests, frontend tests, scripts, CI configuration"
+        }
+      ],
+      "acceptance": [
+        "go test ./... exits 0 under Go 1.26.3 or a later Go 1.26.x patch release.",
+        "The frontend unit or component test command exits 0.",
+        "A startup test with an empty data directory creates SQLite and all required document directories.",
+        "A smoke test registers a repo, creates a session, records intent, queues analysis, imports candidates, approves a candidate, and creates an extraction plan.",
+        "A smoke test registers a passing module, opens the Workbench, adds a node, connects compatible ports, saves and validates a blueprint.",
+        "A smoke test queues a wiring job for a valid blueprint and displays the returned tmux attach command.",
+        "CI or the all-tests command fails when any implemented /api/* route, request schema, response schema, status code, error code, or generated frontend API type drifts from openapi.yaml."
+      ],
+      "depends_on": [
+        "build-repo-session-job-ui",
+        "build-candidate-module-ui",
+        "build-workbench-blueprint-ui",
+        "implement-blueprint-api"
+      ],
+      "constraints": [
+        "Tests use fake or isolated provider boundaries where needed instead of requiring real remote services.",
+        "The smoke path runs against local filesystem documents and SQLite."
+      ],
+      "files_scope": [
+        "tests/**",
+        "internal/**",
+        "frontend/src/**",
+        "frontend/tests/**",
+        "scripts/**",
+        ".github/workflows/**",
+        "Makefile"
+      ],
+      "priority": "high",
+      "estimate": "medium",
+      "notes": "Covers Testing Requirements and SC-001 through SC-013."
+    }
+  ]
+}

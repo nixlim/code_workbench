@@ -1,0 +1,255 @@
+openapi: 3.1.0
+info:
+  title: Code Workbench API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:5174
+paths:
+  /api/health:
+    get: {operationId: getHealth, tags: [system], responses: {'200': {$ref: '#/components/responses/Health'}}}
+  /api/config:
+    get: {operationId: getConfig, tags: [system], responses: {'200': {$ref: '#/components/responses/Config'}}}
+  /api/repositories:
+    post:
+      operationId: createRepository
+      tags: [repositories]
+      requestBody: {$ref: '#/components/requestBodies/CreateRepository'}
+      responses: {'201': {$ref: '#/components/responses/Repository'}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+    get: {operationId: listRepositories, tags: [repositories], responses: {'200': {$ref: '#/components/responses/RepositoryList'}}}
+  /api/sessions:
+    post:
+      operationId: createSession
+      tags: [sessions]
+      requestBody: {$ref: '#/components/requestBodies/CreateSession'}
+      responses: {'201': {$ref: '#/components/responses/Session'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}
+    get: {operationId: listSessions, tags: [sessions], responses: {'200': {$ref: '#/components/responses/SessionList'}}}
+  /api/sessions/{sessionId}:
+    parameters: [{$ref: '#/components/parameters/SessionId'}]
+    get: {operationId: getSession, tags: [sessions], responses: {'200': {$ref: '#/components/responses/Session'}, '404': {$ref: '#/components/responses/Error'}}}
+  /api/sessions/{sessionId}/files:
+    parameters: [{$ref: '#/components/parameters/SessionId'}, {$ref: '#/components/parameters/RelativePath'}]
+    get: {operationId: getSessionFile, tags: [sessions], responses: {'200': {$ref: '#/components/responses/SourceFile'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}}}
+  /api/sessions/{sessionId}/intent:
+    parameters: [{$ref: '#/components/parameters/SessionId'}]
+    post:
+      operationId: setSessionIntent
+      tags: [sessions]
+      requestBody: {$ref: '#/components/requestBodies/SessionIntent'}
+      responses: {'200': {$ref: '#/components/responses/Session'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /api/sessions/{sessionId}/analysis-jobs:
+    parameters: [{$ref: '#/components/parameters/SessionId'}]
+    post: {operationId: queueAnalysisJob, tags: [jobs], requestBody: {$ref: '#/components/requestBodies/Provider'}, responses: {'200': {$ref: '#/components/responses/AgentJob'}, '202': {$ref: '#/components/responses/AgentJob'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}}
+  /api/candidates:
+    get: {operationId: listCandidates, tags: [candidates], parameters: [{$ref: '#/components/parameters/SessionFilter'}, {$ref: '#/components/parameters/RepositoryFilter'}, {$ref: '#/components/parameters/StatusFilter'}, {$ref: '#/components/parameters/RiskFilter'}, {$ref: '#/components/parameters/ConfidenceFilter'}, {$ref: '#/components/parameters/CapabilityFilter'}], responses: {'200': {$ref: '#/components/responses/CandidateList'}}}
+  /api/candidates/{candidateId}:
+    parameters: [{$ref: '#/components/parameters/CandidateId'}]
+    patch:
+      operationId: updateCandidate
+      tags: [candidates]
+      requestBody: {$ref: '#/components/requestBodies/PatchCandidate'}
+      responses: {'200': {$ref: '#/components/responses/Candidate'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /api/candidates/{candidateId}/approve:
+    parameters: [{$ref: '#/components/parameters/CandidateId'}]
+    post: {operationId: approveCandidate, tags: [candidates], requestBody: {$ref: '#/components/requestBodies/Reason'}, responses: {'200': {$ref: '#/components/responses/Candidate'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}}
+  /api/candidates/{candidateId}/reject:
+    parameters: [{$ref: '#/components/parameters/CandidateId'}]
+    post: {operationId: rejectCandidate, tags: [candidates], requestBody: {$ref: '#/components/requestBodies/Reason'}, responses: {'200': {$ref: '#/components/responses/Candidate'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}}
+  /api/candidates/{candidateId}/defer:
+    parameters: [{$ref: '#/components/parameters/CandidateId'}]
+    post: {operationId: deferCandidate, tags: [candidates], requestBody: {$ref: '#/components/requestBodies/Reason'}, responses: {'200': {$ref: '#/components/responses/Candidate'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}}
+  /api/candidates/{candidateId}/duplicate:
+    parameters: [{$ref: '#/components/parameters/CandidateId'}]
+    post: {operationId: duplicateCandidate, tags: [candidates], requestBody: {$ref: '#/components/requestBodies/Reason'}, responses: {'200': {$ref: '#/components/responses/Candidate'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}}
+  /api/candidates/{candidateId}/rescan:
+    parameters: [{$ref: '#/components/parameters/CandidateId'}]
+    post: {operationId: rescanCandidate, tags: [candidates], requestBody: {$ref: '#/components/requestBodies/OptionalReason'}, responses: {'200': {$ref: '#/components/responses/Candidate'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}}
+  /api/extraction-plans:
+    post:
+      operationId: createExtractionPlan
+      tags: [extraction]
+      requestBody: {$ref: '#/components/requestBodies/CreateExtractionPlan'}
+      responses: {'201': {$ref: '#/components/responses/ExtractionPlan'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /api/extraction-plans/{planId}:
+    parameters: [{$ref: '#/components/parameters/PlanId'}]
+    get: {operationId: getExtractionPlan, tags: [extraction], responses: {'200': {$ref: '#/components/responses/ExtractionPlan'}, '404': {$ref: '#/components/responses/Error'}}}
+  /api/extraction-plans/{planId}/jobs:
+    parameters: [{$ref: '#/components/parameters/PlanId'}]
+    post: {operationId: queueExtractionJob, tags: [jobs], requestBody: {$ref: '#/components/requestBodies/Provider'}, responses: {'200': {$ref: '#/components/responses/AgentJob'}, '202': {$ref: '#/components/responses/AgentJob'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}}
+  /api/modules:
+    get: {operationId: listModules, tags: [modules], responses: {'200': {$ref: '#/components/responses/ModuleList'}}}
+    post: {operationId: registerModule, tags: [modules], requestBody: {$ref: '#/components/requestBodies/RegisterModule'}, responses: {'201': {$ref: '#/components/responses/Module'}, '400': {$ref: '#/components/responses/Error'}, '422': {$ref: '#/components/responses/Error'}}}
+  /api/modules/{moduleId}:
+    parameters: [{$ref: '#/components/parameters/ModuleId'}]
+    get: {operationId: getModule, tags: [modules], responses: {'200': {$ref: '#/components/responses/Module'}, '404': {$ref: '#/components/responses/Error'}}}
+  /api/modules/{moduleId}/compare:
+    parameters: [{$ref: '#/components/parameters/ModuleId'}]
+    post: {operationId: compareModule, tags: [modules], requestBody: {$ref: '#/components/requestBodies/CompareModule'}, responses: {'200': {$ref: '#/components/responses/RegistryComparison'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}}}
+  /api/workbench/palette:
+    get: {operationId: getWorkbenchPalette, tags: [workbench], responses: {'200': {$ref: '#/components/responses/ModuleList'}}}
+  /api/workbench/validate-edge:
+    post:
+      operationId: validateWorkbenchEdge
+      tags: [workbench]
+      requestBody: {$ref: '#/components/requestBodies/ValidateEdge'}
+      responses: {'200': {$ref: '#/components/responses/EdgeValidation'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '422': {$ref: '#/components/responses/Error'}}
+  /api/blueprints:
+    post: {operationId: createBlueprint, tags: [blueprints], requestBody: {$ref: '#/components/requestBodies/Blueprint'}, responses: {'201': {$ref: '#/components/responses/Blueprint'}, '400': {$ref: '#/components/responses/Error'}, '422': {$ref: '#/components/responses/Error'}}}
+    get: {operationId: listBlueprints, tags: [blueprints], responses: {'200': {$ref: '#/components/responses/BlueprintList'}}}
+  /api/blueprints/{blueprintId}:
+    parameters: [{$ref: '#/components/parameters/BlueprintId'}]
+    get: {operationId: getBlueprint, tags: [blueprints], responses: {'200': {$ref: '#/components/responses/Blueprint'}, '404': {$ref: '#/components/responses/Error'}}}
+    patch: {operationId: updateBlueprint, tags: [blueprints], requestBody: {$ref: '#/components/requestBodies/Blueprint'}, responses: {'200': {$ref: '#/components/responses/Blueprint'}, '400': {$ref: '#/components/responses/Error'}, '422': {$ref: '#/components/responses/Error'}}}
+  /api/blueprints/{blueprintId}/validate:
+    parameters: [{$ref: '#/components/parameters/BlueprintId'}]
+    post: {operationId: validateBlueprint, tags: [blueprints], responses: {'200': {$ref: '#/components/responses/Blueprint'}, '404': {$ref: '#/components/responses/Error'}, '422': {$ref: '#/components/responses/Error'}}}
+  /api/blueprints/{blueprintId}/wiring-jobs:
+    parameters: [{$ref: '#/components/parameters/BlueprintId'}]
+    post: {operationId: queueWiringJob, tags: [jobs], requestBody: {$ref: '#/components/requestBodies/Provider'}, responses: {'200': {$ref: '#/components/responses/AgentJob'}, '202': {$ref: '#/components/responses/AgentJob'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}}
+  /api/agent-jobs:
+    get: {operationId: listAgentJobs, tags: [jobs], responses: {'200': {$ref: '#/components/responses/AgentJobList'}}}
+  /api/agent-jobs/{jobId}:
+    parameters: [{$ref: '#/components/parameters/JobId'}]
+    get: {operationId: getAgentJob, tags: [jobs], responses: {'200': {$ref: '#/components/responses/AgentJob'}, '404': {$ref: '#/components/responses/Error'}}}
+  /api/agent-jobs/{jobId}/open:
+    parameters: [{$ref: '#/components/parameters/JobId'}]
+    post: {operationId: openAgentJob, tags: [jobs], responses: {'200': {$ref: '#/components/responses/JobOpen'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}}
+  /api/agent-jobs/{jobId}/cancel:
+    parameters: [{$ref: '#/components/parameters/JobId'}]
+    post: {operationId: cancelAgentJob, tags: [jobs], responses: {'200': {$ref: '#/components/responses/AgentJob'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}}
+components:
+  parameters:
+    SessionId: {name: sessionId, in: path, required: true, schema: {type: string}}
+    CandidateId: {name: candidateId, in: path, required: true, schema: {type: string}}
+    PlanId: {name: planId, in: path, required: true, schema: {type: string}}
+    ModuleId: {name: moduleId, in: path, required: true, schema: {type: string}}
+    BlueprintId: {name: blueprintId, in: path, required: true, schema: {type: string}}
+    JobId: {name: jobId, in: path, required: true, schema: {type: string}}
+    RelativePath: {name: path, in: query, required: true, schema: {type: string, not: {pattern: '(^/|\\.\\.|\\\\)'}}}
+    SessionFilter: {name: sessionId, in: query, required: false, schema: {type: string}}
+    RepositoryFilter: {name: repositoryId, in: query, required: false, schema: {type: string}}
+    StatusFilter: {name: status, in: query, required: false, schema: {type: string}}
+    RiskFilter: {name: extractionRisk, in: query, required: false, schema: {type: string}}
+    ConfidenceFilter: {name: confidence, in: query, required: false, schema: {type: string}}
+    CapabilityFilter: {name: capability, in: query, required: false, schema: {type: string}}
+  responses:
+    Health: {description: Health response, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+    Config: {description: Config response, content: {application/json: {schema: {$ref: '#/components/schemas/Config'}}}}
+    Repository: {description: Repository response, content: {application/json: {schema: {$ref: '#/components/schemas/Repository'}}}}
+    RepositoryList: {description: Repository list response, content: {application/json: {schema: {$ref: '#/components/schemas/RepositoryList'}}}}
+    Session: {description: Session response, content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
+    SessionList: {description: Session list response, content: {application/json: {schema: {$ref: '#/components/schemas/SessionList'}}}}
+    SourceFile: {description: Source file response, content: {application/json: {schema: {$ref: '#/components/schemas/SourceFile'}}}}
+    Candidate: {description: Candidate response, content: {application/json: {schema: {$ref: '#/components/schemas/Candidate'}}}}
+    CandidateList: {description: Candidate list response, content: {application/json: {schema: {$ref: '#/components/schemas/CandidateList'}}}}
+    ExtractionPlan: {description: Extraction plan response, content: {application/json: {schema: {$ref: '#/components/schemas/ExtractionPlan'}}}}
+    Module: {description: Module response, content: {application/json: {schema: {$ref: '#/components/schemas/Module'}}}}
+    ModuleList: {description: Module list response, content: {application/json: {schema: {$ref: '#/components/schemas/ModuleList'}}}}
+    RegistryComparison: {description: Registry comparison response, content: {application/json: {schema: {$ref: '#/components/schemas/RegistryComparison'}}}}
+    EdgeValidation: {description: Edge validation response, content: {application/json: {schema: {$ref: '#/components/schemas/EdgeValidation'}}}}
+    Blueprint: {description: Blueprint response, content: {application/json: {schema: {$ref: '#/components/schemas/Blueprint'}}}}
+    BlueprintList: {description: Blueprint list response, content: {application/json: {schema: {$ref: '#/components/schemas/BlueprintList'}}}}
+    AgentJob: {description: Agent job response, content: {application/json: {schema: {$ref: '#/components/schemas/AgentJob'}}}}
+    AgentJobList: {description: Agent job list response, content: {application/json: {schema: {$ref: '#/components/schemas/AgentJobList'}}}}
+    JobOpen: {description: Job open response, content: {application/json: {schema: {$ref: '#/components/schemas/JobOpen'}}}}
+    Error: {description: Error response, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+  requestBodies:
+    CreateRepository: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [sourceType, sourceUri], properties: {name: {type: string}, sourceType: {enum: [local_path, git_url]}, sourceUri: {type: string}, defaultBranch: {type: string}}}}}}
+    CreateSession: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [repositoryId], properties: {repositoryId: {type: string}}}}}}
+    SessionIntent: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionIntent'}}}}
+    PatchCandidate: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {proposedName: {type: string}, description: {type: string}, moduleKind: {type: string}}}}}}
+    Reason: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [reason], properties: {reason: {type: string, minLength: 3}, duplicateModuleId: {type: string}}}}}}
+    OptionalReason: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {reason: {type: string}, duplicateModuleId: {type: string}}}}}}
+    Provider: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {provider: {type: string, enum: [claude_code_tmux, fake]}}}}}}
+    CompareModule: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {compareToModuleId: {type: string}}}}}}
+    CreateExtractionPlan: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [sessionId, approvedCandidateIds], properties: {sessionId: {type: string}, approvedCandidateIds: {type: array, items: {type: string}}, rejectedCandidateIds: {type: array, items: {type: string}}}}}}}
+    RegisterModule:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [name, sourceRepositoryId, sourceSessionId, sourceCandidateId, moduleKind, importPath, ports, configSchema, docs, testStatus, extractionJobId, sourceFiles, testFiles, manifest, provenance]
+            properties:
+              name: {type: string, minLength: 1}
+              sourceRepositoryId: {type: string, minLength: 1}
+              sourceSessionId: {type: string, minLength: 1}
+              sourceCandidateId: {type: string, minLength: 1}
+              language: {type: string, default: go}
+              moduleKind: {type: string, minLength: 1}
+              importPath: {type: string, minLength: 1}
+              capabilities: {type: array, items: {type: string}}
+              ports: {type: object, required: [inputs, outputs], properties: {inputs: {type: array, minItems: 1, items: {$ref: '#/components/schemas/Port'}}, outputs: {type: array, minItems: 1, items: {$ref: '#/components/schemas/Port'}}}}
+              configSchema: {type: object, additionalProperties: true}
+              docs: {type: string, minLength: 1}
+              testStatus: {enum: [not_run, passing, failing]}
+              extractionJobId: {type: string, minLength: 1}
+              sourceFiles: {type: array, minItems: 1, items: {type: string, not: {pattern: '(^/|\\.\\.|\\\\)'}}}
+              testFiles: {type: array, minItems: 1, items: {type: string, not: {pattern: '(^/|\\.\\.|\\\\)'}}}
+              manifest: {type: object, additionalProperties: true}
+              provenance: {type: object, additionalProperties: true}
+    ValidateEdge: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [sourceModuleId, sourcePort, targetModuleId, targetPort], properties: {sourceModuleId: {type: string}, sourcePort: {type: string}, targetModuleId: {type: string}, targetPort: {type: string}}}}}}
+    Blueprint: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/BlueprintRequest'}}}}
+  schemas:
+    RepositoryList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Repository'}}}}
+    SessionList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Session'}}}}
+    CandidateList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Candidate'}}}}
+    ModuleList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Module'}}}}
+    BlueprintList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Blueprint'}}}}
+    AgentJobList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/AgentJob'}}}}
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [request.invalid_json, request.missing_field, request.unknown_field, request.invalid_enum, path.invalid, resource.not_found, repository.duplicate, session.invalid_transition, state.conflict, candidate.not_approved, candidate.invalid_transition, agent_job.not_running, blueprint.invalid, blueprint.port_type_mismatch, candidate_report.invalid, module_output.invalid, job.timeout, job.interrupted, repository.clone_failed, agent_provider.start_failed, artifact.write_failed, database.operation_failed]
+            message: {type: string}
+            details: {type: object, additionalProperties: true}
+    Port: {type: object, required: [name, type], properties: {name: {type: string, pattern: '^[a-z][a-z0-9_]{0,63}$'}, type: {type: string, pattern: '^[A-Z][A-Za-z0-9]*(<([A-Z][A-Za-z0-9]*)(,[A-Z][A-Za-z0-9]*)*>)?$'}, required: {type: boolean}}}
+    SessionIntent: {type: object, additionalProperties: false, required: [allowAgentDiscovery], properties: {specificFunctionality: {type: string}, areasOfInterest: {type: array, items: {type: string}}, sourceHints: {type: array, items: {type: string}}, avoidPatterns: {type: array, items: {type: string}}, preferredTargetLanguage: {type: string}, allowAgentDiscovery: {type: boolean}, expectedUpdatedAt: {type: string}}}
+    CandidateReport:
+      type: object
+      required: [candidates]
+      properties:
+        candidates:
+          type: array
+          items:
+            type: object
+            required: [proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, sourcePaths, reusableRationale, couplingNotes, dependencies, sideEffects, testsFound, missingTests, ports, workbenchNode]
+            properties:
+              proposedName: {type: string, minLength: 1}
+              description: {type: string, minLength: 1}
+              moduleKind: {type: string, minLength: 1}
+              targetLanguage: {type: string, default: go}
+              confidence: {enum: [low, medium, high]}
+              extractionRisk: {enum: [low, medium, high]}
+              sourcePaths: {type: array, minItems: 1, items: {type: string}}
+              reusableRationale: {type: string, minLength: 1}
+              couplingNotes: {type: string, minLength: 1}
+              dependencies: {type: array, items: {type: string}}
+              sideEffects: {type: array, items: {type: string}}
+              testsFound: {type: array, items: {type: string}}
+              missingTests: {type: array, items: {type: string}}
+              ports: {type: object, required: [inputs, outputs], properties: {inputs: {type: array, minItems: 1, items: {$ref: '#/components/schemas/Port'}}, outputs: {type: array, minItems: 1, items: {$ref: '#/components/schemas/Port'}}}}
+              workbenchNode: {type: object, additionalProperties: true}
+    ModuleManifest: {type: object, required: [name, version, ports, provenance]}
+    Health: {type: object, required: [status, database, storage, workers], properties: {status: {type: string}, database: {type: boolean}, storage: {type: boolean}, workers: {type: object}}}
+    Config: {type: object, required: [dataDir, allowedRoots, concurrency, providers], properties: {dataDir: {type: string}, allowedRoots: {type: array, items: {type: string}}, concurrency: {type: object}, providers: {type: array, items: {type: string}}}}
+    Repository: {type: object, required: [id, name, sourceType, sourceUri, createdAt, updatedAt], properties: {id: {type: string}, name: {type: string}, sourceType: {enum: [local_path, git_url]}, sourceUri: {type: string}, defaultBranch: {type: string}, createdAt: {type: string}, updatedAt: {type: string}}}
+    Session: {type: object, required: [id, repositoryId, repoName, checkoutPath, scratchPath, phase, createdAt, updatedAt], properties: {id: {type: string}, repositoryId: {type: string}, repoName: {type: string}, checkoutPath: {type: string}, scratchPath: {type: string}, phase: {type: string}, intentJsonPath: {type: string}, candidateReportPath: {type: string}, extractionPlanPath: {type: string}, activeJobRole: {type: string}, jobs: {type: array, items: {$ref: '#/components/schemas/AgentJob'}}, createdAt: {type: string}, updatedAt: {type: string}}}
+    Candidate: {type: object, required: [id, sessionId, repositoryId, proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, status], properties: {id: {type: string}, sessionId: {type: string}, repositoryId: {type: string}, proposedName: {type: string}, description: {type: string}, moduleKind: {type: string}, targetLanguage: {type: string}, confidence: {enum: [low, medium, high]}, extractionRisk: {enum: [low, medium, high]}, status: {type: string}, sourcePathsJson: {type: array, items: {type: string}}, reusableRationale: {type: string}, couplingNotes: {type: string}, dependenciesJson: {type: array, items: {type: string}}, sideEffectsJson: {type: array, items: {type: string}}, testsFoundJson: {type: array, items: {type: string}}, missingTestsJson: {type: array, items: {type: string}}, portsJson: {type: object}, workbenchNodeJson: {type: object}, userReason: {type: string}, approvedAt: {type: string}, createdAt: {type: string}, updatedAt: {type: string}}}
+    ExtractionPlan: {type: object, required: [id, sessionId, repositoryId, status, planPath], properties: {id: {type: string}, sessionId: {type: string}, repositoryId: {type: string}, status: {type: string}, planPath: {type: string}, approvedCandidateIdsJson: {type: array, items: {type: string}}, rejectedCandidateIdsJson: {type: array, items: {type: string}}, createdAt: {type: string}, updatedAt: {type: string}}}
+    Module: {type: object, required: [id, name, version, sourceRepositoryId, sourceSessionId, sourceCandidateId, portsJson, manifestPath, testStatus], properties: {id: {type: string}, name: {type: string}, version: {type: string}, sourceRepositoryId: {type: string}, sourceSessionId: {type: string}, sourceCandidateId: {type: string}, language: {type: string}, moduleKind: {type: string}, importPath: {type: string}, capabilitiesJson: {type: array, items: {type: string}}, portsJson: {type: object}, configSchemaPath: {type: string}, manifestPath: {type: string}, docsPath: {type: string}, examplesPath: {type: string}, testStatus: {enum: [not_run, passing, failing]}, availableInWorkbench: {type: integer}, createdAt: {type: string}, updatedAt: {type: string}}}
+    RegistryComparison: {type: object, required: [moduleId, classification, capabilityOverlap, sourcePathOverlap, portsIdentical, configIdentical, dependenciesOverlap], properties: {moduleId: {type: string}, comparedModuleId: {type: string}, classification: {enum: [new_module, duplicate, variant, adapter_needed, merge_candidate, reject_duplicate]}, capabilityOverlap: {type: number}, sourcePathOverlap: {type: number}, portsIdentical: {type: boolean}, configIdentical: {type: boolean}, dependenciesOverlap: {type: boolean}}}
+    EdgeValidation: {type: object, required: [ok, sourceType, targetType], properties: {ok: {type: boolean}, sourceType: {type: string}, targetType: {type: string}}}
+    Blueprint: {type: object, required: [id, name, semanticDocumentPath, flowLayoutPath, validationStatus, targetLanguage, outputKind, packageName], properties: {id: {type: string}, name: {type: string}, semanticDocumentPath: {type: string}, flowLayoutPath: {type: string}, validationStatus: {enum: [not_run, valid, invalid]}, validationReportPath: {type: string}, validationReport: {type: object}, targetLanguage: {type: string}, outputKind: {enum: [service, cli, daemon, worker, library]}, packageName: {type: string}, createdAt: {type: string}, updatedAt: {type: string}}}
+    AgentJob: {type: object, required: [id, role, provider, status, subjectType, subjectId, promptPath, timeoutSeconds], properties: {id: {type: string}, role: {type: string}, provider: {type: string}, status: {enum: [queued, running, succeeded, failed, cancelled]}, subjectType: {type: string}, subjectId: {type: string}, tmuxSessionName: {type: string}, promptPath: {type: string}, transcriptPath: {type: string}, outputArtifactPath: {type: string}, timeoutSeconds: {type: integer}, lastHeartbeatAt: {type: string}, exitCode: {type: integer}, errorCode: {type: string}, createdAt: {type: string}, startedAt: {type: string}, finishedAt: {type: string}, attachCommand: {type: string}}}
+    JobOpen: {type: object, required: [tmuxSessionName, attachCommand], properties: {tmuxSessionName: {type: string}, attachCommand: {type: string}}}
+    SourceFile: {type: object, required: [path, content], properties: {path: {type: string}, content: {type: string}}}
+    OperationResult: {type: object, additionalProperties: true}
+    BlueprintRequest: {type: object, additionalProperties: false, required: [semanticDocument, flowLayout], properties: {name: {type: string}, semanticDocument: {type: object, additionalProperties: true}, flowLayout: {type: object, additionalProperties: true}, targetLanguage: {type: string}, outputKind: {enum: [service, cli, daemon, worker, library]}, packageName: {type: string, pattern: '^[a-z][a-z0-9_]*$'}}}

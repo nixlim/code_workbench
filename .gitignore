@@ -3,3 +3,14 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Devlog session state
+.devlog/
+
+# Local build outputs
+/workbench
+node_modules/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+/frontend/tsconfig.tsbuildinfo
