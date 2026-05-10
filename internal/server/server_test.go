@@ -78,6 +78,10 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	if code != 409 || dup["error"].(map[string]any)["code"] != "repository.duplicate" {
 		t.Fatalf("duplicate repo status=%d body=%v", code, dup)
 	}
+	code, unknown := doJSON(t, app, http.MethodPost, "/api/repositories", map[string]any{"sourceType": "local_path", "sourceUri": repoPath, "unexpected": true})
+	if code != 400 || unknown["error"].(map[string]any)["code"] != "request.unknown_field" {
+		t.Fatalf("unknown field status=%d body=%v", code, unknown)
+	}
 	repoID := repo["id"].(string)
 	code, session := doJSON(t, app, http.MethodPost, "/api/sessions", map[string]any{"repositoryId": repoID})
 	if code != 201 || session["phase"] != "awaiting_user_intent" {
@@ -100,8 +104,16 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	if job["promptPath"] != filepath.Join(app.cfg.DataDir, "jobs", jobID, "prompt.md") {
 		t.Fatalf("prompt path=%v", job["promptPath"])
 	}
+	code, session = doJSON(t, app, http.MethodGet, "/api/sessions/"+sessionID, nil)
+	if code != 200 || session["phase"] != "analysing" {
+		t.Fatalf("queued analysis did not enter analysing phase status=%d body=%v", code, session)
+	}
 	if err := app.CompleteJob(context.Background(), jobID, 0, ""); err != nil {
 		t.Fatal(err)
+	}
+	code, session = doJSON(t, app, http.MethodGet, "/api/sessions/"+sessionID, nil)
+	if code != 200 || session["phase"] != "awaiting_approval" {
+		t.Fatalf("candidate import did not enter awaiting_approval phase status=%d body=%v", code, session)
 	}
 	code, candidates := doJSON(t, app, http.MethodGet, "/api/candidates", nil)
 	if code != 200 || len(candidates["items"].([]any)) != 1 {

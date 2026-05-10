@@ -221,7 +221,18 @@ func (a *App) handleAnalysisJob(w http.ResponseWriter, r *http.Request) {
 	}
 	status, job, err := a.QueueJob(r.Context(), "repo_analysis", "session", r.PathValue("sessionId"), req.Provider)
 	if err == nil && status == 202 {
-		_ = a.transitionSession(r.Context(), r.PathValue("sessionId"), "", "queued")
+		sessionID := r.PathValue("sessionId")
+		if phase == "ready_for_analysis" {
+			_ = a.transitionSession(r.Context(), sessionID, "", "queued")
+		}
+		if jobStatus, _ := job["status"].(string); jobStatus == "running" {
+			_ = a.transitionSession(r.Context(), sessionID, "", "analysing")
+		}
+	}
+	if err == nil && status == 200 && phase == "queued" {
+		if jobStatus, _ := job["status"].(string); jobStatus == "running" {
+			_ = a.transitionSession(r.Context(), r.PathValue("sessionId"), "", "analysing")
+		}
 	}
 	one(w, err, status, job)
 }
@@ -1277,8 +1288,7 @@ func (a *App) importCandidateReport(ctx context.Context, job Job) error {
 				return err
 			}
 		}
-		_, err := tx.Exec(`UPDATE repo_sessions SET phase='candidates_ready', candidate_report_path=?, updated_at=? WHERE id=?`, path, now(), job.SubjectID)
+		_, err := tx.Exec(`UPDATE repo_sessions SET phase='awaiting_approval', candidate_report_path=?, updated_at=? WHERE id=?`, path, now(), job.SubjectID)
 		return err
 	})
 }
-

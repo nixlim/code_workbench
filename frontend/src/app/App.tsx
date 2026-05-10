@@ -96,7 +96,7 @@ function Sessions({ onError }: { onError: (value: string) => void }) {
           <article className="row-card" key={s.id}>
             <strong>{s.repoName}</strong><span>{s.phase}</span><span>{s.activeJobRole ?? 'No active job'}</span><span>{nextAction(s)}</span><span>{s.updatedAt}</span>
             <button onClick={() => api.post(`/api/sessions/${s.id}/intent`, { specificFunctionality: intent, allowAgentDiscovery: true, expectedUpdatedAt: s.updatedAt }).then(load).catch((e) => onError(e.message))}>Save Intent</button>
-            <button onClick={() => api.post(`/api/sessions/${s.id}/analysis-jobs`, {}).then(load).catch((e) => onError(e.message))}>Queue Analysis</button>
+            <button disabled={s.phase !== 'ready_for_analysis'} onClick={() => api.post(`/api/sessions/${s.id}/analysis-jobs`, {}).then(load).catch((e) => onError(e.message))}>Queue Analysis</button>
           </article>
         ))}
       </div>
@@ -170,13 +170,16 @@ function Modules({ onError }: { onError: (value: string) => void }) {
 
 function Blueprints({ onError }: { onError: (value: string) => void }) {
   const [items, setItems] = useState<Blueprint[]>([]);
+  const [validationReport, setValidationReport] = useState<unknown>(null);
+  const [wiringJob, setWiringJob] = useState<AgentJob | null>(null);
   const load = () => api.list<Blueprint>('/api/blueprints').then((r) => setItems(r.items)).catch((e) => onError(e.message));
   useEffect(() => { void load(); }, []);
-  return <section><Header title="Blueprints" /><Table rows={items} columns={['name', 'validationStatus', 'targetLanguage', 'outputKind', 'packageName']} />{items.map((b) => <article className="row-card" key={b.id}><button onClick={() => api.post(`/api/blueprints/${b.id}/validate`).then(load).catch((e) => onError(e.message))}>Validate</button><button onClick={() => api.post(`/api/blueprints/${b.id}/wiring-jobs`).catch((e) => onError(e.message))}>Generate Code</button></article>)}</section>;
+  return <section><Header title="Blueprints" /><Table rows={items} columns={['name', 'validationStatus', 'targetLanguage', 'outputKind', 'packageName']} />{validationReport !== null && <pre className="source-view">{JSON.stringify(validationReport, null, 2)}</pre>}{wiringJob && <div className="notice">{wiringJob.role} {wiringJob.status}</div>}{items.map((b) => <article className="row-card" key={b.id}><button onClick={() => api.post<Blueprint & { validationReport?: unknown }>(`/api/blueprints/${b.id}/validate`).then((result) => { setValidationReport(result.validationReport ?? null); return load(); }).catch((e) => onError(e.message))}>Validate</button><button onClick={() => api.post<AgentJob>(`/api/blueprints/${b.id}/wiring-jobs`).then(setWiringJob).catch((e) => onError(e.message))}>Generate Code</button></article>)}</section>;
 }
 
 function Jobs({ onError }: { onError: (value: string) => void }) {
   const [items, setItems] = useState<AgentJob[]>([]);
+  const [attachCommand, setAttachCommand] = useState('');
   const load = () => api.list<AgentJob>('/api/agent-jobs').then((r) => setItems(r.items)).catch((e) => onError(e.message));
   const runningIds = useMemo(() => items.filter((j) => j.status === 'running').map((j) => j.id).sort().join(','), [items]);
   useEffect(() => { load(); }, []);
@@ -189,7 +192,7 @@ function Jobs({ onError }: { onError: (value: string) => void }) {
     }, 5000);
     return () => window.clearInterval(id);
   }, [runningIds]);
-  return <section><Header title="Agent Jobs" /><Table rows={items} columns={['role', 'provider', 'status', 'subjectType', 'subjectId', 'tmuxSessionName', 'createdAt', 'startedAt', 'finishedAt']} />{items.map((j) => <article className="row-card" key={j.id}><button onClick={() => api.post(`/api/agent-jobs/${j.id}/open`).catch((e) => onError(e.message))}>Open</button><button onClick={() => api.post(`/api/agent-jobs/${j.id}/cancel`).then(load).catch((e) => onError(e.message))}>Cancel</button></article>)}</section>;
+  return <section><Header title="Agent Jobs" />{attachCommand && <div className="notice">{attachCommand}</div>}<Table rows={items} columns={['role', 'provider', 'status', 'subjectType', 'subjectId', 'tmuxSessionName', 'createdAt', 'startedAt', 'finishedAt']} />{items.map((j) => <article className="row-card" key={j.id}><button onClick={() => api.post<{ attachCommand: string }>(`/api/agent-jobs/${j.id}/open`).then((r) => setAttachCommand(r.attachCommand)).catch((e) => onError(e.message))}>Open</button><button onClick={() => api.post(`/api/agent-jobs/${j.id}/cancel`).then(load).catch((e) => onError(e.message))}>Cancel</button></article>)}</section>;
 }
 
 function Header({ title }: { title: string }) {

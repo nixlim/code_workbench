@@ -212,6 +212,10 @@ func decodeStrict(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		if strings.HasPrefix(err.Error(), "json: unknown field ") {
+			field := strings.Trim(err.Error()[len("json: unknown field "):], `"`)
+			return APIError{Status: 400, Code: "request.unknown_field", Message: "unknown request field", Details: map[string]any{"field": field}}
+		}
 		return APIError{Status: 400, Code: "request.invalid_json", Message: err.Error()}
 	}
 	return nil
