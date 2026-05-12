@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -22,6 +23,7 @@ type Config struct {
 	AllowedExplicit bool
 	Dev             bool
 	EnableFake      bool
+	DebugLogs       bool
 	AnalysisLimit   int
 	ExtractionLimit int
 	WiringLimit     int
@@ -45,6 +47,7 @@ func Parse(args []string) (Config, error) {
 		ExtractionLimit: DefaultExtractionLimit,
 		WiringLimit:     DefaultWiringLimit,
 	}
+	applyConfigFile(&cfg, "config.yaml")
 	fs := flag.NewFlagSet("workbench", flag.ContinueOnError)
 	fs.StringVar(&cfg.Host, "host", cfg.Host, "HTTP host")
 	fs.IntVar(&cfg.Port, "port", cfg.Port, "HTTP port")
@@ -61,6 +64,13 @@ func Parse(args []string) (Config, error) {
 		return cfg, err
 	}
 	cfg.DataDir = filepath.Clean(absData)
+	for _, name := range []string{"DEBUG_LOGS", "CODE_WORKBENCH_DEBUG_LOGS"} {
+		if env, ok := os.LookupEnv(name); ok {
+			if value, err := strconv.ParseBool(env); err == nil {
+				cfg.DebugLogs = value
+			}
+		}
+	}
 
 	if len(roots) > 0 {
 		cfg.AllowedExplicit = true
@@ -82,6 +92,23 @@ func Parse(args []string) (Config, error) {
 	}
 	cfg.AllowedRoots = cleanRoots([]string{wd})
 	return cfg, nil
+}
+
+func applyConfigFile(cfg *Config, path string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(key) != "DEBUG_LOGS" {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.DebugLogs = parsed
+		}
+	}
 }
 
 func cleanRoots(in []string) []string {

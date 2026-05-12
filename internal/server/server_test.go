@@ -173,6 +173,21 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	if !strings.Contains(promptText, "For non-Go source candidates") {
 		t.Fatalf("extraction prompt does not require non-Go conversion:\n%s", promptText)
 	}
+	code, inspected := doJSON(t, app, http.MethodGet, "/api/agent-jobs/"+extractionJob["id"].(string), nil)
+	if code != 200 {
+		t.Fatalf("inspect extraction job status=%d body=%v", code, inspected)
+	}
+	prompt := inspected["prompt"].(map[string]any)
+	if !strings.Contains(prompt["content"].(string), candidate["id"].(string)) {
+		t.Fatalf("job inspector prompt missing approved candidate ID: %v", prompt)
+	}
+	transcript := inspected["transcript"].(map[string]any)
+	if !strings.Contains(transcript["content"].(string), "fake provider started") {
+		t.Fatalf("job inspector transcript missing provider output: %v", transcript)
+	}
+	if metrics := inspected["metrics"].(map[string]any); metrics["promptBytes"] == nil || metrics["transcriptBytes"] == nil {
+		t.Fatalf("job inspector metrics missing prompt/transcript bytes: %v", metrics)
+	}
 	readRoot := filepath.Join(app.cfg.DataDir, "jobs", extractionJob["id"].(string), "workspace", "read")
 	if _, err := os.Stat(filepath.Join(readRoot, "repo", "README.md")); err != nil {
 		t.Fatalf("extraction read root missing source checkout: %v", err)

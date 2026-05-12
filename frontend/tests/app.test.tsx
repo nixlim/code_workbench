@@ -63,3 +63,35 @@ it('lets users place modules on a composition canvas before intent is entered', 
   expect(screen.getByText('registry-helper@0.1.0')).toBeInTheDocument();
   expect(screen.getByText('Create composition')).toBeDisabled();
 });
+
+it('surfaces agent job prompts transcripts metrics and detected events', async () => {
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request) => {
+    const path = String(url);
+    const job = {
+      id: 'job_1',
+      role: 'extraction',
+      provider: 'fake',
+      status: 'running',
+      subjectType: 'extraction_plan',
+      subjectId: 'plan_1',
+      promptPath: '/tmp/job_1/prompt.md',
+      transcriptPath: '/tmp/job_1/output/transcript.txt',
+      outputArtifactPath: '/tmp/job_1/output',
+      timeoutSeconds: 3600,
+      createdAt: 'now'
+    };
+    const body = path.endsWith('/api/agent-jobs/job_1')
+      ? { ...job, prompt: { path: job.promptPath, content: 'Extract paperclip module', bytes: 24, truncated: false }, transcript: { path: job.transcriptPath, content: 'Do you want to continue?', bytes: 24, truncated: false, events: [{ kind: 'prompt', line: 1, text: 'Do you want to continue?' }] }, metrics: { promptBytes: 24, transcriptBytes: 24, detectedEvents: 1 }, outputFiles: [{ path: 'manifest.json', size: 12 }] }
+      : path.includes('/api/agent-jobs')
+        ? { items: [job] }
+        : { items: [] };
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  fireEvent.click(screen.getAllByText('Agent Jobs')[0]);
+  fireEvent.click(await screen.findByText('Inspect'));
+  expect(await screen.findByText('Extract paperclip module')).toBeInTheDocument();
+  expect(screen.getAllByText('Do you want to continue?').length).toBeGreaterThan(0);
+  expect(screen.getByText('promptBytes')).toBeInTheDocument();
+  expect(screen.getByText('manifest.json')).toBeInTheDocument();
+});

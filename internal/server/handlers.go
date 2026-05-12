@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"code_workbench/internal/paths"
 	"code_workbench/internal/storage"
@@ -1272,7 +1273,100 @@ func (a *App) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	job, err := getSingle(a.store.DB, `SELECT * FROM agent_jobs WHERE id=?`, r.PathValue("jobId"))
+	if err == nil {
+		job = a.inspectJob(job)
+	}
 	one(w, err, 200, job)
+}
+
+func (a *App) inspectJob(job map[string]any) map[string]any {
+	promptPath := asString(job["promptPath"])
+	transcriptPath := asString(job["transcriptPath"])
+	outputPath := asString(job["outputArtifactPath"])
+	metrics := map[string]any{}
+	if promptPath != "" {
+		if content, info, err := readTextArtifact(promptPath, 256*1024); err == nil {
+			job["prompt"] = map[string]any{"path": info.Path, "content": content, "bytes": info.Size, "truncated": info.Truncated}
+			metrics["promptBytes"] = info.Size
+		}
+	}
+	if transcriptPath != "" {
+		if content, info, err := readTextArtifact(transcriptPath, 512*1024); err == nil {
+			events := classifyAgentTranscript(content)
+			job["transcript"] = map[string]any{"path": info.Path, "content": content, "bytes": info.Size, "truncated": info.Truncated, "lineCount": strings.Count(content, "\n"), "events": events}
+			metrics["transcriptBytes"] = info.Size
+			metrics["transcriptLines"] = strings.Count(content, "\n")
+			metrics["detectedEvents"] = len(events)
+		}
+	}
+	if outputPath != "" {
+		if files, err := outputFiles(outputPath, 200); err == nil {
+			job["outputFiles"] = files
+			metrics["outputFiles"] = len(files)
+		}
+	}
+	if started := asString(job["startedAt"]); started != "" {
+		if start, err := time.Parse(time.RFC3339Nano, started); err == nil {
+			end := time.Now().UTC()
+			if finished := asString(job["finishedAt"]); finished != "" {
+				if parsed, err := time.Parse(time.RFC3339Nano, finished); err == nil {
+					end = parsed
+				}
+			}
+			metrics["durationSeconds"] = int(end.Sub(start).Seconds())
+		}
+	}
+	job["metrics"] = metrics
+	return job
+}
+
+func classifyAgentTranscript(content string) []map[string]any {
+	lines := strings.Split(content, "\n")
+	events := []map[string]any{}
+	for i, line := range lines {
+		text := strings.TrimSpace(stripANSI(line))
+		if text == "" {
+			continue
+		}
+		kind := ""
+		lower := strings.ToLower(text)
+		switch {
+		case strings.Contains(lower, "permission") || strings.Contains(lower, "do you want") || strings.Contains(lower, "continue?") || strings.Contains(lower, "proceed?") || strings.Contains(lower, "awaiting"):
+			kind = "prompt"
+		case strings.Contains(text, "Bash(") || strings.Contains(text, "Read(") || strings.Contains(text, "Edit(") || strings.Contains(text, "Write(") || strings.Contains(lower, "tool"):
+			kind = "tool"
+		case strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "exception"):
+			kind = "error"
+		case strings.Contains(lower, "tokens") || strings.Contains(lower, "cost") || strings.Contains(lower, "duration"):
+			kind = "metric"
+		case strings.HasPrefix(lower, "human:") || strings.HasPrefix(lower, "assistant:") || strings.HasPrefix(lower, "user:"):
+			kind = "message"
+		}
+		if kind != "" {
+			events = append(events, map[string]any{"kind": kind, "line": i + 1, "text": text})
+		}
+	}
+	return events
+}
+
+func stripANSI(s string) string {
+	var b strings.Builder
+	inEscape := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inEscape {
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+				inEscape = false
+			}
+			continue
+		}
+		if c == 0x1b {
+			inEscape = true
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 func (a *App) handleOpenJob(w http.ResponseWriter, r *http.Request) {

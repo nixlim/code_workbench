@@ -402,10 +402,78 @@ function Modules({ onError }: { onError: (value: string) => void }) {
 
 function Jobs({ onError }: { onError: (value: string) => void }) {
   const [items, setItems] = useState<AgentJob[]>([]);
+  const [inspected, setInspected] = useState<AgentJob | null>(null);
   const [attachCommand, setAttachCommand] = useState('');
   const load = () => api.list<AgentJob>('/api/agent-jobs').then((r) => setItems(r.items)).catch((e) => onError(e.message));
+  const inspect = (job: AgentJob) => api.get<AgentJob>(`/api/agent-jobs/${job.id}`).then(setInspected).catch((e) => onError(e.message));
   useEffect(() => { load(); }, []);
-  return <section><Header title="Agent Jobs" />{attachCommand && <div className="notice">{attachCommand}</div>}<Table rows={items} columns={['role', 'provider', 'status', 'subjectType', 'subjectId', 'tmuxSessionName', 'createdAt', 'finishedAt']} />{items.map((j) => <article className="row-card" key={j.id}><button onClick={() => api.post<{ attachCommand: string }>(`/api/agent-jobs/${j.id}/open`).then((r) => setAttachCommand(r.attachCommand)).catch((e) => onError(e.message))}>Open</button><button onClick={() => api.post(`/api/agent-jobs/${j.id}/cancel`).then(load).catch((e) => onError(e.message))}>Cancel</button></article>)}</section>;
+  return (
+    <section>
+      <Header title="Agent Jobs" />
+      <div className="toolbar">
+        <button onClick={() => void load()} aria-label="Refresh jobs"><RefreshCw size={16} /></button>
+      </div>
+      {attachCommand && <div className="notice">{attachCommand}</div>}
+      <Table rows={items} columns={['role', 'provider', 'status', 'subjectType', 'subjectId', 'tmuxSessionName', 'createdAt', 'finishedAt']} />
+      <div className="stack job-actions">
+        {items.map((j) => (
+          <article className={inspected?.id === j.id ? 'row-card selected' : 'row-card'} key={j.id}>
+            <strong>{j.role}</strong>
+            <span>{j.status}</span>
+            <span>{j.id}</span>
+            <button onClick={() => inspect(j)}>Inspect</button>
+            <button onClick={() => api.post<{ attachCommand: string }>(`/api/agent-jobs/${j.id}/open`).then((r) => setAttachCommand(r.attachCommand)).catch((e) => onError(e.message))}>Open</button>
+            <button onClick={() => api.post(`/api/agent-jobs/${j.id}/cancel`).then(load).catch((e) => onError(e.message))}>Cancel</button>
+          </article>
+        ))}
+      </div>
+      {inspected && <JobInspector job={inspected} />}
+    </section>
+  );
+}
+
+function JobInspector({ job }: { job: AgentJob }) {
+  const events = job.transcript?.events ?? [];
+  const files = job.outputFiles ?? [];
+  return (
+    <section className="panel job-inspector">
+      <h3>{job.role} {job.status}</h3>
+      <div className="metrics-grid">
+        {Object.entries(job.metrics ?? {}).map(([key, value]) => <span key={key}><strong>{key}</strong>{value}</span>)}
+        {Object.keys(job.metrics ?? {}).length === 0 && <span><strong>metrics</strong>none yet</span>}
+      </div>
+      <div className="job-detail-grid">
+        <LogBlock title="Prompt" path={job.prompt?.path ?? job.promptPath} content={job.prompt?.content ?? ''} truncated={job.prompt?.truncated} />
+        <LogBlock title="Transcript" path={job.transcript?.path ?? job.transcriptPath} content={job.transcript?.content ?? ''} truncated={job.transcript?.truncated} />
+      </div>
+      <div className="job-detail-grid">
+        <section>
+          <h4>Detected messages and prompts</h4>
+          <div className="event-list">
+            {events.map((event) => <span key={`${event.kind}-${event.line}`}><strong>{event.kind}</strong><em>line {event.line}</em>{event.text}</span>)}
+            {events.length === 0 && <span>No prompt, tool, metric, or error markers detected yet.</span>}
+          </div>
+        </section>
+        <section>
+          <h4>Output files</h4>
+          <div className="event-list">
+            {files.map((file) => <span key={file.path}><strong>{file.path}</strong><em>{file.size} bytes</em></span>)}
+            {files.length === 0 && <span>No output files yet.</span>}
+          </div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function LogBlock({ title, path, content, truncated }: { title: string; path?: string; content: string; truncated?: boolean }) {
+  return (
+    <section>
+      <h4>{title}</h4>
+      {path && <div className="path-line">{path}{truncated ? ' (tail shown)' : ''}</div>}
+      <pre className="log-block">{content || 'No content captured yet.'}</pre>
+    </section>
+  );
 }
 
 function Header({ title }: { title: string }) {

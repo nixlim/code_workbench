@@ -3,6 +3,7 @@ package logging
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,11 +12,12 @@ import (
 )
 
 type JSONL struct {
-	mu sync.Mutex
-	w  io.WriteCloser
+	mu     sync.Mutex
+	w      io.WriteCloser
+	mirror bool
 }
 
-func NewJSONL(path string) (*JSONL, error) {
+func NewJSONL(path string, mirror ...bool) (*JSONL, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
@@ -23,7 +25,11 @@ func NewJSONL(path string) (*JSONL, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &JSONL{w: f}, nil
+	l := &JSONL{w: f}
+	if len(mirror) > 0 {
+		l.mirror = mirror[0]
+	}
+	return l, nil
 }
 
 func (l *JSONL) Close() error {
@@ -49,4 +55,7 @@ func (l *JSONL) Event(kind string, attrs map[string]any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, _ = l.w.Write(append(b, '\n'))
+	if l.mirror {
+		log.Print(string(b))
+	}
 }

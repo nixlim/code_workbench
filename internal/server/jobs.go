@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -313,6 +315,7 @@ func (a *App) QueueJob(ctx context.Context, role, subjectType, subjectID, provid
 	if err := renderPrompt(promptPath, role, promptData); err != nil {
 		return 0, nil, err
 	}
+	a.logPrompt(id, role, promptPath)
 	ts := now()
 	_, err := a.store.DB.ExecContext(ctx, `INSERT INTO agent_jobs(id,role,provider,status,subject_type,subject_id,prompt_path,output_artifact_path,timeout_seconds,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, role, provider, "queued", subjectType, subjectID, promptPath, outputRoot, a.cfg.TimeoutSeconds(role), ts)
 	if err != nil && strings.Contains(err.Error(), "agent_jobs_one_active") {
@@ -322,6 +325,7 @@ func (a *App) QueueJob(ctx context.Context, role, subjectType, subjectID, provid
 	if err != nil {
 		return 0, nil, err
 	}
+	a.log.Event("job_queued", map[string]any{"jobId": id, "role": role, "provider": provider, "subjectType": subjectType, "subjectId": subjectID, "promptPath": promptPath, "outputPath": outputRoot})
 	a.tryStartQueued(ctx)
 	job, err := getSingle(a.store.DB, `SELECT * FROM agent_jobs WHERE id=?`, id)
 	return 202, job, err
@@ -669,10 +673,11 @@ func (a *App) tryStartQueued(ctx context.Context) {
 		start, err := provider.Start(ctx, job)
 		if err != nil {
 			_, _ = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='failed', error_code='agent_provider.start_failed', finished_at=? WHERE id=?`, now(), job.ID)
+			a.log.Event("job_start_failed", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider, "error": err.Error()})
 			continue
 		}
 		_, _ = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='running', tmux_session_name=?, transcript_path=?, output_artifact_path=?, started_at=?, last_heartbeat_at=? WHERE id=?`, start.TmuxSessionName, start.TranscriptPath, start.OutputPath, now(), now(), job.ID)
-		a.log.Event("job_started", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider})
+		a.log.Event("job_started", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider, "tmuxSessionName": start.TmuxSessionName, "transcriptPath": start.TranscriptPath, "outputPath": start.OutputPath})
 	}
 }
 
@@ -687,6 +692,7 @@ func (a *App) ReconcileInterrupted(ctx context.Context) error {
 		if err := rows.Scan(&job.ID, &job.Role, &job.Provider, &job.Status, &job.SubjectType, &job.SubjectID, &job.TmuxSessionName, &job.PromptPath, &job.TranscriptPath, &job.OutputPath, &job.TimeoutSeconds); err != nil {
 			return err
 		}
+		a.emitTranscriptDelta(job)
 		provider := a.providers[job.Provider]
 		active := false
 		if provider != nil {
@@ -751,6 +757,54 @@ func (a *App) PollOnce(ctx context.Context) error {
 	}
 	a.tryStartQueued(ctx)
 	return nil
+}
+
+func (a *App) logPrompt(jobID, role, path string) {
+	if !a.cfg.DebugLogs {
+		return
+	}
+	content, info, err := readTextArtifact(path, 64*1024)
+	if err != nil {
+		a.log.Event("job_prompt_unreadable", map[string]any{"jobId": jobID, "role": role, "path": path, "error": err.Error()})
+		return
+	}
+	a.log.Event("job_prompt", map[string]any{"jobId": jobID, "role": role, "path": path, "bytes": info.Size, "truncated": info.Truncated, "content": content})
+}
+
+func (a *App) emitTranscriptDelta(job Job) {
+	if !a.cfg.DebugLogs || job.TranscriptPath == "" {
+		return
+	}
+	f, err := os.Open(job.TranscriptPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return
+	}
+	a.mu.Lock()
+	offset := a.logPos[job.ID]
+	if offset > info.Size() {
+		offset = 0
+	}
+	if offset == info.Size() {
+		a.mu.Unlock()
+		return
+	}
+	readOffset := offset
+	if info.Size()-readOffset > 64*1024 {
+		readOffset = info.Size() - 64*1024
+	}
+	a.logPos[job.ID] = info.Size()
+	a.mu.Unlock()
+	buf := make([]byte, info.Size()-readOffset)
+	if _, err := f.ReadAt(buf, readOffset); err != nil && !errors.Is(err, io.EOF) {
+		return
+	}
+	text := string(buf)
+	a.log.Event("job_transcript", map[string]any{"jobId": job.ID, "role": job.Role, "path": job.TranscriptPath, "fromByte": readOffset, "toByte": info.Size(), "truncated": readOffset != offset, "content": text})
 }
 
 func (a *App) RunScheduler(ctx context.Context) {
@@ -845,4 +899,74 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+type textArtifactInfo struct {
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	Truncated bool   `json:"truncated"`
+}
+
+func readTextArtifact(path string, limit int64) (string, textArtifactInfo, error) {
+	info := textArtifactInfo{Path: path}
+	if path == "" {
+		return "", info, os.ErrNotExist
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		return "", info, err
+	}
+	info.Size = stat.Size()
+	readSize := stat.Size()
+	if readSize > limit {
+		readSize = limit
+		info.Truncated = true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", info, err
+	}
+	defer f.Close()
+	if info.Truncated {
+		if _, err := f.Seek(stat.Size()-readSize, 0); err != nil {
+			return "", info, err
+		}
+	}
+	b := make([]byte, readSize)
+	n, err := io.ReadFull(f, b)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", info, err
+	}
+	return string(b[:n]), info, nil
+}
+
+func outputFiles(root string, limit int) ([]map[string]any, error) {
+	if root == "" {
+		return nil, nil
+	}
+	files := []map[string]any{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			rel = path
+		}
+		info, _ := d.Info()
+		size := int64(0)
+		if info != nil {
+			size = info.Size()
+		}
+		files = append(files, map[string]any{"path": rel, "size": size})
+		return nil
+	})
+	sort.Slice(files, func(i, j int) bool { return asString(files[i]["path"]) < asString(files[j]["path"]) })
+	if len(files) > limit {
+		files = files[:limit]
+	}
+	return files, err
 }

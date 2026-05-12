@@ -32,6 +32,7 @@ type App struct {
 	providers map[string]AgentProvider
 	mu        sync.Mutex
 	started   map[string]bool
+	logPos    map[string]int64
 }
 
 type APIError struct {
@@ -54,12 +55,12 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	logw, err := logging.NewJSONL(filepath.Join(cfg.DataDir, "documents", "ops.jsonl"))
+	logw, err := logging.NewJSONL(filepath.Join(cfg.DataDir, "documents", "ops.jsonl"), cfg.DebugLogs)
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
-	app := &App{cfg: cfg, store: store, log: logw, started: map[string]bool{}}
+	app := &App{cfg: cfg, store: store, log: logw, started: map[string]bool{}, logPos: map[string]int64{}}
 	app.providers = map[string]AgentProvider{
 		"claude_code_tmux": NewClaudeProvider(cfg.DataDir),
 	}
