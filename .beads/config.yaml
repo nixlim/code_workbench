@@ -52,3 +52,9 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+# Dolt server connection for server mode.
+dolt:
+  host: 127.0.0.1
+  port: 3309
+  user: root
