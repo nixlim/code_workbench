@@ -33,3 +33,33 @@ it('blocks composition compile before clarification answers are saved', () => {
   fireEvent.click(screen.getAllByText('Freeform Composition')[0]);
   expect(screen.getByText('Compile blueprint and spec')).toBeDisabled();
 });
+
+it('shows registered sources so duplicates can be reused', async () => {
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request) => {
+    const path = String(url);
+    const body = path.includes('/api/repositories')
+      ? { items: [{ id: 'repo_1', name: 'existing-repo', sourceType: 'git_url', sourceUri: 'https://example.test/repo.git', sourceCheckoutPath: '.sources/existing-repo', createdAt: 'now', updatedAt: 'now' }] }
+      : { items: [] };
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  expect(await screen.findByText('existing-repo')).toBeInTheDocument();
+  expect(screen.getByText('.sources/existing-repo')).toBeInTheDocument();
+  expect(screen.getByText('Use for extraction')).toBeInTheDocument();
+});
+
+it('lets users place modules on a composition canvas before intent is entered', async () => {
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request) => {
+    const path = String(url);
+    const body = path.includes('/api/workbench/palette')
+      ? { items: [{ id: 'mod_1', name: 'registry-helper', version: '0.1.0', sourceRepositoryId: 'repo', sourceCandidateId: 'cand', language: 'go', moduleKind: 'library', capabilitiesJson: ['registry'], portsJson: { inputs: [{ name: 'in', type: 'Message' }], outputs: [{ name: 'out', type: 'Message' }] }, testStatus: 'passing', docsPath: 'docs', availableInWorkbench: 1 }] }
+      : { items: [] };
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  fireEvent.click(screen.getAllByText('Freeform Composition')[0]);
+  fireEvent.click(await screen.findByText('registry-helper'));
+  expect(screen.getByLabelText('Composition canvas')).toBeInTheDocument();
+  expect(screen.getByText('registry-helper@0.1.0')).toBeInTheDocument();
+  expect(screen.getByText('Create composition')).toBeDisabled();
+});

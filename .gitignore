@@ -9,6 +9,7 @@
 
 # Local build outputs
 /workbench
+.sources/
 node_modules/
 /frontend/node_modules/
 /frontend/dist/

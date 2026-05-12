@@ -1,10 +1,13 @@
-import { Boxes, FileText, GitBranch, PlaySquare, WandSparkles } from 'lucide-react';
+import ReactFlow, { Background, Controls, Handle, Position, addEdge, useEdgesState, useNodesState, type Connection, type NodeProps } from 'reactflow';
+import { Boxes, FileText, GitBranch, PlaySquare, Plus, RefreshCw, WandSparkles } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { AgentJob, Candidate, Composition, ModuleRecord, Repository, Session, SpecEnrichment } from '../api/generated/types';
-import { api } from '../api/client';
+import { APIRequestError, api } from '../api/client';
 
 type Screen = 'registry' | 'spec' | 'composition' | 'modules' | 'jobs';
+type Port = { name: string; type: string; required?: boolean };
+type ModuleNodeData = { label: string; module: ModuleRecord };
 
 const screens: Array<{ id: Screen; label: string; icon: React.ComponentType<{ size?: number }> }> = [
   { id: 'registry', label: 'Registry & Code Extraction', icon: GitBranch },
@@ -49,30 +52,95 @@ export function App() {
 function RegistryExtractionWizard({ onError }: { onError: (value: string) => void }) {
   const [sourceType, setSourceType] = useState<'local_path' | 'git_url'>('local_path');
   const [sourceUri, setSourceUri] = useState('');
+  const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [repo, setRepo] = useState<Repository | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [intent, setIntent] = useState('');
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [reason, setReason] = useState('approved for extraction');
   const [planId, setPlanId] = useState('');
+  const [message, setMessage] = useState('');
   const approvedIds = useMemo(() => candidates.filter((c) => c.status === 'approved').map((c) => c.id), [candidates]);
+
+  const loadRepositories = () => api.list<Repository>('/api/repositories').then((r) => setRepositories(r.items)).catch((e) => onError(e.message));
+  const loadSessions = () => api.list<Session>('/api/sessions').then((r) => setSessions(r.items)).catch((e) => onError(e.message));
+  useEffect(() => {
+    void loadRepositories();
+    void loadSessions();
+  }, []);
 
   const loadCandidates = (sessionId = session?.id) => {
     if (!sessionId) return Promise.resolve();
     return api.list<Candidate>(`/api/candidates?sessionId=${encodeURIComponent(sessionId)}`).then((r) => setCandidates(r.items)).catch((e) => onError(e.message));
   };
-  const begin = async () => {
-    const saved = await api.post<Repository>('/api/repositories', { sourceType, sourceUri });
-    setRepo(saved);
-    const created = await api.post<Session>('/api/sessions', { repositoryId: saved.id });
+  const startSession = async (target: Repository) => {
+    let usable = target;
+    if (!target.sourceCheckoutPath) {
+      usable = await api.post<Repository>('/api/repositories', {
+        name: target.name,
+        sourceType: target.sourceType,
+        sourceUri: target.sourceUri,
+        rescan: true
+      });
+      await loadRepositories();
+      setMessage(`${usable.name} had no .sources checkout, so it was rescanned first.`);
+    }
+    setRepo(usable);
+    let created: Session;
+    try {
+      created = await api.post<Session>('/api/sessions', { repositoryId: usable.id });
+    } catch (e) {
+      if (e instanceof APIRequestError && e.code === 'repository.clone_failed') {
+        usable = await api.post<Repository>('/api/repositories', {
+          name: target.name,
+          sourceType: target.sourceType,
+          sourceUri: target.sourceUri,
+          rescan: true
+        });
+        await loadRepositories();
+        setRepo(usable);
+        created = await api.post<Session>('/api/sessions', { repositoryId: usable.id });
+      } else {
+        throw e;
+      }
+    }
     setSession(created);
     setCandidates([]);
+    setPlanId('');
+    setMessage(`${usable.name} is ready for candidate scanning.`);
+    await loadSessions();
+  };
+  const begin = async () => {
+    try {
+      const saved = await api.post<Repository>('/api/repositories', { sourceType, sourceUri });
+      await loadRepositories();
+      await startSession(saved);
+    } catch (e) {
+      if (e instanceof APIRequestError && e.code === 'repository.duplicate') {
+        const existing = e.details?.repository as Repository | undefined;
+        if (existing?.id) {
+          await loadRepositories();
+          await startSession(existing);
+          setMessage(`${existing.name} is already registered. Using the existing .sources checkout.`);
+          return;
+        }
+      }
+      throw e;
+    }
+  };
+  const rescan = async () => {
+    const saved = await api.post<Repository>('/api/repositories', { sourceType, sourceUri, rescan: true });
+    await loadRepositories();
+    await startSession(saved);
+    setMessage(`${saved.name} was rescanned into .sources.`);
   };
   const scan = async () => {
     if (!session) return;
     const updated = await api.post<Session>(`/api/sessions/${session.id}/intent`, { specificFunctionality: intent, allowAgentDiscovery: true, expectedUpdatedAt: session.updatedAt });
     setSession(updated);
     await api.post<AgentJob>(`/api/sessions/${session.id}/analysis-jobs`, {});
+    await loadSessions();
   };
   const decide = (candidate: Candidate, action: 'approve' | 'reject' | 'defer' | 'rescan') => {
     void api.post<Candidate>(`/api/candidates/${candidate.id}/${action}`, { reason }).then(() => loadCandidates(candidate.sessionId)).catch((e) => onError(e.message));
@@ -95,8 +163,40 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
             </select>
             <input value={sourceUri} onChange={(e) => setSourceUri(e.target.value)} placeholder="Repository path or URL" />
             <button onClick={() => begin().catch((e) => onError(e.message))}>Import to .sources</button>
+            <button onClick={() => rescan().catch((e) => onError(e.message))}>Rescan source</button>
+            <button onClick={() => { void loadRepositories(); void loadSessions(); }} aria-label="Refresh registered sources"><RefreshCw size={16} /></button>
           </div>
-          {repo && <div className="notice">{repo.name} stored at {repo.sourceCheckoutPath}</div>}
+          {message && <div className="notice">{message}</div>}
+          {repo && repo.sourceCheckoutPath && <div className="notice">{repo.name} stored at {repo.sourceCheckoutPath}</div>}
+          <div className="source-grid">
+            <div>
+              <h4>Registered sources</h4>
+              <div className="stack">
+                {repositories.map((item) => (
+                  <article className={repo?.id === item.id ? 'row-card selected' : 'row-card'} key={item.id}>
+                    <strong>{item.name}</strong>
+                    <span>{item.sourceType}</span>
+                    <span>{item.sourceCheckoutPath || item.sourceUri}</span>
+                    <button onClick={() => startSession(item).catch((e) => onError(e.message))}>Use for extraction</button>
+                  </article>
+                ))}
+                {repositories.length === 0 && <div className="notice">No registered sources.</div>}
+              </div>
+            </div>
+            <div>
+              <h4>Recent extraction sessions</h4>
+              <div className="stack">
+                {sessions.slice(0, 6).map((item) => (
+                  <article className={session?.id === item.id ? 'row-card selected' : 'row-card'} key={item.id}>
+                    <strong>{item.repoName}</strong>
+                    <span>{item.phase}</span>
+                    <button onClick={() => { setSession(item); setRepo(repositories.find((r) => r.id === item.repositoryId) ?? repo); void loadCandidates(item.id); }}>Continue</button>
+                  </article>
+                ))}
+                {sessions.length === 0 && <div className="notice">No extraction sessions.</div>}
+              </div>
+            </div>
+          </div>
         </Panel>
         <Panel title="2. Scan candidates">
           <div className="toolbar">
@@ -160,15 +260,63 @@ function SpecEnrichmentWizard({ onError }: { onError: (value: string) => void })
 
 function CompositionWizard({ onError }: { onError: (value: string) => void }) {
   const [modules, setModules] = useState<ModuleRecord[]>([]);
-  const [selected, setSelected] = useState<string[]>([]);
   const [intent, setIntent] = useState('');
   const [composition, setComposition] = useState<Composition | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [inspected, setInspected] = useState<ModuleRecord | null>(null);
+  const [nodes, setNodes, onNodesChange] = useNodesState<ModuleNodeData>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const nodeTypes = useMemo(() => ({ moduleNode: ModuleNode }), []);
   useEffect(() => { api.list<ModuleRecord>('/api/workbench/palette').then((r) => setModules(r.items)).catch((e) => onError(e.message)); }, []);
-  const toggle = (id: string) => setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  const create = () => {
-    const flowLayout = { nodes: selected.map((id, index) => ({ id, position: { x: 80 + index * 180, y: 120 }, data: { moduleId: id } })), edges: [] };
-    return api.post<Composition>('/api/compositions', { intent, selectedModuleIds: selected, flowLayout }).then(setComposition).catch((e) => onError(e.message));
+  const selectedModuleIds = useMemo(() => unique(nodes.map((node) => node.data.module.id)), [nodes]);
+  const addModule = (module: ModuleRecord) => {
+    setInspected(module);
+    setNodes((current) => [
+      ...current,
+      {
+        id: `${module.id}-${current.length + 1}`,
+        type: 'moduleNode',
+        position: { x: 80 + (current.length % 4) * 260, y: 80 + Math.floor(current.length / 4) * 170 },
+        data: { label: `${module.name}@${module.version}`, module }
+      }
+    ]);
+  };
+  const onConnect = async (connection: Connection) => {
+    const source = nodes.find((node) => node.id === connection.source)?.data.module;
+    const target = nodes.find((node) => node.id === connection.target)?.data.module;
+    const sourcePort = findPort(source, 'outputs', connection.sourceHandle);
+    const targetPort = findPort(target, 'inputs', connection.targetHandle);
+    if (!source || !target || !sourcePort || !targetPort) {
+      onError('Incompatible ports cannot be connected.');
+      return;
+    }
+    await api.post('/api/workbench/validate-edge', { sourceModuleId: source.id, sourcePort: sourcePort.name, targetModuleId: target.id, targetPort: targetPort.name });
+    setEdges((current) => addEdge({ ...connection, data: { sourcePort: sourcePort.name, targetPort: targetPort.name } }, current));
+  };
+  const flowLayout = () => ({
+    nodes: nodes.map((node) => ({
+      id: node.id,
+      type: node.type,
+      position: node.position,
+      data: { moduleId: node.data.module.id, label: node.data.label }
+    })),
+    edges: edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      sourceHandle: edge.sourceHandle,
+      target: edge.target,
+      targetHandle: edge.targetHandle,
+      data: edge.data
+    }))
+  });
+  const create = async () => {
+    const saved = await api.post<Composition>('/api/compositions', { intent, selectedModuleIds: selectedModuleIds, flowLayout: flowLayout() });
+    setComposition(saved);
+  };
+  const saveLayout = async () => {
+    if (!composition) return;
+    const saved = await api.patch<Composition>(`/api/compositions/${composition.id}/layout`, { flowLayout: flowLayout() });
+    setComposition(saved);
   };
   const refresh = () => composition && api.get<Composition>(`/api/compositions/${composition.id}`).then(setComposition).catch((e) => onError(e.message));
   const questions = Array.isArray(composition?.questionsJson) ? composition.questionsJson : [];
@@ -177,20 +325,50 @@ function CompositionWizard({ onError }: { onError: (value: string) => void }) {
     <section>
       <Header title="Freeform Composition" />
       <div className="wizard-grid">
-        <Panel title="1. Select components">
-          <div className="module-list">
-            {modules.map((module) => (
-              <label key={module.id}>
-                <input type="checkbox" checked={selected.includes(module.id)} onChange={() => toggle(module.id)} />
-                <span>{module.name}@{module.version}</span>
-              </label>
-            ))}
+        <Panel title="1. Compose system">
+          <div className="composition-grid">
+            <aside className="palette compact">
+              {modules.map((module) => (
+                <button key={module.id} onClick={() => addModule(module)}>
+                  <Plus size={16} />
+                  <strong>{module.name}</strong>
+                  <span>{module.version}</span>
+                </button>
+              ))}
+              {modules.length === 0 && <div className="notice">No workbench modules are available.</div>}
+            </aside>
+            <div className="canvas composition-canvas" aria-label="Composition canvas">
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                nodeTypes={nodeTypes}
+                onNodesChange={onNodesChange}
+                onEdgesChange={onEdgesChange}
+                onConnect={(connection) => onConnect(connection).catch((e) => onError(e.message))}
+                onNodeClick={(_, node) => setInspected(node.data.module)}
+                fitView
+              >
+                <Background />
+                <Controls />
+              </ReactFlow>
+            </div>
+            <aside className="inspector">
+              {inspected ? (
+                <>
+                  <h3>{inspected.name}</h3>
+                  <pre>{JSON.stringify(inspected.portsJson, null, 2)}</pre>
+                </>
+              ) : (
+                <span>Select a module</span>
+              )}
+            </aside>
           </div>
         </Panel>
         <Panel title="2. Clarify intent">
           <div className="toolbar">
             <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Composition intent" />
-            <button disabled={selected.length === 0 || !intent} onClick={create}>Create composition</button>
+            <button disabled={selectedModuleIds.length === 0 || !intent} onClick={() => create().catch((e) => onError(e.message))}>Create composition</button>
+            <button disabled={!composition} onClick={() => saveLayout().catch((e) => onError(e.message))}>Save layout</button>
             <button disabled={!composition} onClick={() => composition && api.post(`/api/compositions/${composition.id}/clarification-jobs`, {}).then(refresh).catch((e) => onError(e.message))}>Ask clarifying questions</button>
             <button disabled={!composition} onClick={() => void refresh()}>Refresh</button>
           </div>
@@ -249,4 +427,51 @@ function formatCell(value: unknown) {
   if (value == null) return '';
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
+}
+
+function ModuleNode({ data }: NodeProps<ModuleNodeData>) {
+  const inputs = getPorts(data.module, 'inputs');
+  const outputs = getPorts(data.module, 'outputs');
+  return (
+    <div className="module-node">
+      <strong>{data.label}</strong>
+      <div className="module-node-ports">
+        <div>{inputs.map((port, index) => <PortRow key={port.name} port={port} type="target" index={index} total={inputs.length} />)}</div>
+        <div>{outputs.map((port, index) => <PortRow key={port.name} port={port} type="source" index={index} total={outputs.length} />)}</div>
+      </div>
+    </div>
+  );
+}
+
+function PortRow({ port, type, index, total }: { port: Port; type: 'source' | 'target'; index: number; total: number }) {
+  const top = `${((index + 1) / (total + 1)) * 100}%`;
+  return (
+    <span className={`port-row ${type}`}>
+      <Handle id={port.name} type={type} position={type === 'source' ? Position.Right : Position.Left} style={{ top }} />
+      {port.name}
+      <em>{port.type}{port.required ? ' required' : ''}</em>
+    </span>
+  );
+}
+
+function findPort(module: ModuleRecord | undefined, direction: 'inputs' | 'outputs', name: string | null | undefined) {
+  return getPorts(module, direction).find((port) => port.name === name);
+}
+
+function getPorts(module: ModuleRecord | undefined, direction: 'inputs' | 'outputs'): Port[] {
+  const raw = module?.portsJson;
+  const ports = typeof raw === 'string' ? safeJSON<{ inputs?: Port[]; outputs?: Port[] }>(raw) : raw as { inputs?: Port[]; outputs?: Port[] } | undefined;
+  return ports?.[direction] ?? [];
+}
+
+function safeJSON<T>(value: string): T | undefined {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function unique(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)));
 }

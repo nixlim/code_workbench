@@ -441,28 +441,55 @@ func uniqueSourcePath(root, slug string) string {
 }
 
 func runGitClone(ctx context.Context, uri, dest string) error {
-	cmd := exec.CommandContext(ctx, "git", "clone", uri, dest)
+	tmp, err := os.MkdirTemp("", "code-workbench-source-clone-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	cmd := exec.CommandContext(ctx, "git", "clone", uri, tmp)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return publishCheckout(tmp, dest)
 }
 
 func createLocalCheckout(ctx context.Context, src, dest string) error {
+	tmp, err := os.MkdirTemp("", "code-workbench-source-worktree-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	cmd := exec.CommandContext(ctx, "git", "-C", src, "worktree", "add", "--detach", tmp, "HEAD")
+	cmd.Env = os.Environ()
+	if out, err := cmd.CombinedOutput(); err == nil {
+		return publishCheckout(tmp, dest)
+	} else {
+		_ = out
+		_ = os.RemoveAll(tmp)
+	}
+	if err := copyDir(src, tmp); err != nil {
+		return err
+	}
+	return publishCheckout(tmp, dest)
+}
+
+func publishCheckout(src, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", src, "worktree", "add", "--detach", dest, "HEAD")
-	cmd.Env = os.Environ()
-	if out, err := cmd.CombinedOutput(); err == nil {
-		return nil
-	} else {
-		_ = out
-		_ = os.RemoveAll(dest)
+	if err := os.RemoveAll(dest); err != nil {
+		return err
 	}
-	return copyDir(src, dest)
+	if err := os.Rename(src, dest); err == nil {
+		return nil
+	}
+	if err := copyDir(src, dest); err != nil {
+		_ = os.RemoveAll(dest)
+		return err
+	}
+	return nil
 }
 
 func copyDir(src, dest string) error {

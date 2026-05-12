@@ -1,5 +1,19 @@
 import type { ListEnvelope } from './generated/types';
 
+export class APIRequestError extends Error {
+  code: string;
+  status: number;
+  details?: Record<string, unknown>;
+
+  constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
+    super(`${code}: ${message}`);
+    this.name = 'APIRequestError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export class APIClient {
   async request<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(path, {
@@ -12,7 +26,7 @@ export class APIClient {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const message = data?.error?.message ?? res.statusText;
-      throw new Error(`${data?.error?.code ?? res.status}: ${message}`);
+      throw new APIRequestError(res.status, data?.error?.code ?? String(res.status), message, data?.error?.details);
     }
     return data as T;
   }
