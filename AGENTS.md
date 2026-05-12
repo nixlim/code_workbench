@@ -127,7 +127,7 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   bd sync  # If unsupported, use: bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
