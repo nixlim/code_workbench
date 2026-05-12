@@ -1,7 +1,7 @@
 import ReactFlow, { Background, Controls, Handle, Position, addEdge, useEdgesState, useNodesState, type Connection, type NodeProps } from 'reactflow';
 import { Boxes, FileText, GitBranch, PlaySquare, Plus, RefreshCw, WandSparkles } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import type { AgentJob, Candidate, Composition, ModuleRecord, Repository, Session, SpecEnrichment } from '../api/generated/types';
 import { APIRequestError, api } from '../api/client';
 
@@ -20,9 +20,27 @@ const screens: Array<{ id: Screen; label: string; icon: React.ComponentType<{ si
 export function App() {
   const [screen, setScreen] = useState<Screen>('registry');
   const [error, setError] = useState('');
+  const [clickFeedback, setClickFeedback] = useState<{ id: number; x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!clickFeedback) return;
+    const timeout = window.setTimeout(() => setClickFeedback(null), 650);
+    return () => window.clearTimeout(timeout);
+  }, [clickFeedback]);
+
+  const showButtonClick = (event: MouseEvent<HTMLDivElement>) => {
+    const button = (event.target as Element | null)?.closest('button');
+    if (!button || button.disabled || !event.currentTarget.contains(button)) return;
+    const rect = button.getBoundingClientRect();
+    setClickFeedback({
+      id: Date.now(),
+      x: rect.left + rect.width / 2,
+      y: Math.max(12, rect.top - 10)
+    });
+  };
 
   return (
-    <div className="shell">
+    <div className="shell" onClickCapture={showButtonClick}>
       <aside className="sidebar">
         <h1>Code Workbench</h1>
         <nav>
@@ -45,6 +63,17 @@ export function App() {
         {screen === 'modules' && <Modules onError={setError} />}
         {screen === 'jobs' && <Jobs onError={setError} />}
       </main>
+      {clickFeedback && (
+        <div
+          key={clickFeedback.id}
+          className="click-feedback"
+          role="status"
+          aria-live="polite"
+          style={{ left: clickFeedback.x, top: clickFeedback.y }}
+        >
+          click
+        </div>
+      )}
     </div>
   );
 }

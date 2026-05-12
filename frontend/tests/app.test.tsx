@@ -28,6 +28,12 @@ it('blocks registry extraction until a candidate is approved', () => {
   expect(screen.getByText('Create extraction plan')).toBeDisabled();
 });
 
+it('shows visible click feedback when enabled buttons are pressed', () => {
+  render(<App />);
+  fireEvent.click(screen.getAllByText('Spec Enrichment')[0]);
+  expect(screen.getByRole('status')).toHaveTextContent('click');
+});
+
 it('blocks composition compile before clarification answers are saved', () => {
   render(<App />);
   fireEvent.click(screen.getAllByText('Freeform Composition')[0]);
