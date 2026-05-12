@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +62,17 @@ func (FakeProvider) Start(ctx context.Context, job Job) (ProviderStart, error) {
 	if job.Role == "repo_analysis" {
 		report := filepath.Join(root, "candidate-report.json")
 		_ = os.WriteFile(report, []byte(`{"candidates":[{"proposedName":"config-loader","description":"Reusable configuration loader","moduleKind":"library","targetLanguage":"go","confidence":"high","extractionRisk":"low","sourcePaths":["README.md"],"reusableRationale":"Centralized config loading is reusable across local services.","couplingNotes":"No runtime coupling identified.","dependencies":["os"],"sideEffects":["reads filesystem"],"testsFound":["README example"],"missingTests":["error path tests"],"ports":{"inputs":[{"name":"config_path","type":"String","required":true}],"outputs":[{"name":"config","type":"Config"}]},"workbenchNode":{"type":"configLoader"}}]}`), 0o644)
+	}
+	if job.Role == "spec_enrichment" {
+		_ = os.WriteFile(filepath.Join(out, "selected-modules.json"), []byte(`[]`), 0o644)
+		_ = os.WriteFile(filepath.Join(out, "enriched.md"), []byte("## Registry References\n\nNo registry modules were selected.\n"), 0o644)
+	}
+	if job.Role == "composition_clarifier" {
+		_ = os.WriteFile(filepath.Join(out, "questions.json"), []byte(`[{"id":"goal","question":"What outcome should this composition optimize for?"}]`), 0o644)
+	}
+	if job.Role == "blueprint_compiler" {
+		_ = os.WriteFile(filepath.Join(out, "blueprint.json"), []byte(`{"nodes":[],"edges":[]}`), 0o644)
+		_ = os.WriteFile(filepath.Join(out, "implementation-spec.md"), []byte("# Composition Implementation Spec\n\n## Registry References\n\nGenerated from selected registry modules.\n"), 0o644)
 	}
 	return ProviderStart{TmuxSessionName: "fake-" + job.ID, TranscriptPath: transcript, OutputPath: out}, nil
 }
@@ -317,9 +329,9 @@ func (a *App) outputRootForJob(role, subjectType, subjectID, jobID string) strin
 
 func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, subjectType, subjectID string) {
 	switch {
-	case role == "repo_analysis":
+	case role == "repo_analysis", role == "candidate_scan":
 		data["OutputContract"] = "Emit candidate-report.json with the CandidateReport schema: {candidates: [{proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, sourcePaths, reusableRationale, couplingNotes, dependencies, sideEffects, testsFound, missingTests, ports: {inputs, outputs}, workbenchNode}]}."
-	case role == "extraction" && subjectType == "extraction_plan":
+	case role == "extraction", role == "module_extraction":
 		data["OutputContract"] = "For each approved candidate, emit module source code, tests, manifest.json, config.schema.json, docs, and provenance metadata under the OutputRoot."
 		var approvedJSON, rejectedJSON string
 		if err := a.store.DB.QueryRowContext(ctx, `SELECT approved_candidate_ids_json, rejected_candidate_ids_json FROM extraction_plans WHERE id=?`, subjectID).Scan(&approvedJSON, &rejectedJSON); err == nil {
@@ -329,6 +341,14 @@ func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, s
 			data["ApprovedCandidateIDs"] = approved
 			data["RejectedCandidateIDs"] = rejected
 		}
+	case role == "spec_enrichment" && subjectType == "spec_enrichment":
+		data["OutputContract"] = "Review the input spec and registry module summaries. Emit selected-modules.json and enriched.md containing a ## Registry References section with module name/version, why it applies, ports/capabilities, expected integration point, and replacement or variant notes."
+	case role == "composition_clarifier" && subjectType == "composition":
+		data["OutputContract"] = "Emit questions.json as an array of {id, question} clarification questions needed before composing the selected registry modules."
+	case role == "blueprint_compiler" && subjectType == "composition":
+		data["OutputContract"] = "Emit blueprint.json for the semantic composition and implementation-spec.md as the companion implementation spec. Keep the spec separate from the blueprint JSON."
+	case role == "composition_spec_writer" && subjectType == "composition":
+		data["OutputContract"] = "Emit implementation-spec.md for the compiled composition using the selected modules, answers, and blueprint."
 	case role == "wiring" && subjectType == "blueprint":
 		data["OutputContract"] = "Generate runnable code, wiring manifest, and validation notes under the OutputRoot based on the semantic blueprint document."
 	default:
@@ -341,18 +361,36 @@ func (a *App) materializeReadRoots(ctx context.Context, role, subjectType, subje
 		return err
 	}
 	switch {
-	case role == "repo_analysis" && subjectType == "session":
+	case (role == "repo_analysis" || role == "candidate_scan" || role == "candidate_registry_compare") && subjectType == "session":
 		var checkout string
 		if err := a.store.DB.QueryRowContext(ctx, `SELECT checkout_path FROM repo_sessions WHERE id=?`, subjectID).Scan(&checkout); err != nil {
 			return err
 		}
 		return copyDir(checkout, filepath.Join(readRoot, "repo"))
-	case role == "extraction" && subjectType == "extraction_plan":
+	case (role == "extraction" || role == "module_extraction" || role == "registry_update") && subjectType == "extraction_plan":
 		var planPath string
 		if err := a.store.DB.QueryRowContext(ctx, `SELECT plan_path FROM extraction_plans WHERE id=?`, subjectID).Scan(&planPath); err != nil {
 			return err
 		}
 		return copyFile(planPath, filepath.Join(readRoot, "extraction-plan.json"), 0o644)
+	case role == "spec_enrichment" && subjectType == "spec_enrichment":
+		var specPath string
+		if err := a.store.DB.QueryRowContext(ctx, `SELECT spec_path FROM spec_enrichments WHERE id=?`, subjectID).Scan(&specPath); err != nil {
+			return err
+		}
+		if err := copyFile(specPath, filepath.Join(readRoot, filepath.Base(specPath)), 0o644); err != nil {
+			return err
+		}
+		return a.writeRegistrySnapshot(filepath.Join(readRoot, "registry-modules.json"))
+	case (role == "composition_clarifier" || role == "blueprint_compiler" || role == "composition_spec_writer") && subjectType == "composition":
+		var flowPath string
+		if err := a.store.DB.QueryRowContext(ctx, `SELECT flow_layout_path FROM compositions WHERE id=?`, subjectID).Scan(&flowPath); err != nil {
+			return err
+		}
+		if err := copyFile(flowPath, filepath.Join(readRoot, "flow-layout.json"), 0o644); err != nil {
+			return err
+		}
+		return a.writeCompositionSnapshot(subjectID, filepath.Join(readRoot, "composition.json"))
 	case role == "wiring" && subjectType == "blueprint":
 		var semanticPath string
 		if err := a.store.DB.QueryRowContext(ctx, `SELECT semantic_document_path FROM blueprints WHERE id=?`, subjectID).Scan(&semanticPath); err != nil {
@@ -362,6 +400,164 @@ func (a *App) materializeReadRoots(ctx context.Context, role, subjectType, subje
 	default:
 		return nil
 	}
+}
+
+func (a *App) writeRegistrySnapshot(path string) error {
+	rows, err := a.store.DB.Query(`SELECT id,name,version,capabilities_json,ports_json,registry_decision,supersedes_module_id,superseded_by_module_id FROM modules WHERE superseded_by_module_id IS NULL ORDER BY name,version DESC`)
+	if err != nil {
+		return err
+	}
+	items, err := scanJSONRows(rows)
+	if err != nil {
+		return err
+	}
+	return writeJSONFile(path, map[string]any{"modules": items})
+}
+
+func (a *App) writeCompositionSnapshot(id, path string) error {
+	item, err := getSingle(a.store.DB, `SELECT * FROM compositions WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	var selected []string
+	if raw, _ := item["selectedModulesJson"].([]any); raw != nil {
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				selected = append(selected, s)
+			}
+		}
+	}
+	modules := []map[string]any{}
+	for _, moduleID := range selected {
+		module, err := getSingle(a.store.DB, `SELECT * FROM modules WHERE id=?`, moduleID)
+		if err == nil {
+			modules = append(modules, module)
+		}
+	}
+	item["selectedModules"] = modules
+	return writeJSONFile(path, item)
+}
+
+func writeJSONFile(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
+}
+
+func (a *App) completeSpecEnrichment(ctx context.Context, job Job) error {
+	var specPath, outputPath, artifactRoot string
+	if err := a.store.DB.QueryRowContext(ctx, `SELECT spec_path,output_path,artifact_root FROM spec_enrichments WHERE id=?`, job.SubjectID).Scan(&specPath, &outputPath, &artifactRoot); err != nil {
+		return err
+	}
+	selectedPath := filepath.Join(job.OutputPath, "selected-modules.json")
+	selectedBytes, err := os.ReadFile(selectedPath)
+	if err != nil || !json.Valid(selectedBytes) {
+		selectedBytes = []byte(`[]`)
+	}
+	var selectedIDs []string
+	_ = json.Unmarshal(selectedBytes, &selectedIDs)
+	if len(selectedIDs) == 0 {
+		rows, qerr := a.store.DB.QueryContext(ctx, `SELECT id FROM modules WHERE available_in_workbench=1 AND superseded_by_module_id IS NULL ORDER BY name,version DESC`)
+		if qerr == nil {
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					selectedIDs = append(selectedIDs, id)
+				}
+			}
+			_ = rows.Close()
+		}
+		if len(selectedIDs) > 0 {
+			selectedBytes, _ = json.Marshal(selectedIDs)
+		}
+	}
+	registryRefsPath := filepath.Join(artifactRoot, "registry-references.json")
+	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(registryRefsPath, selectedBytes, 0o644); err != nil {
+		return err
+	}
+	enrichedBytes, err := os.ReadFile(filepath.Join(job.OutputPath, "enriched.md"))
+	if err != nil || !strings.Contains(string(enrichedBytes), "## Registry References") || len(selectedIDs) > 0 {
+		original, readErr := os.ReadFile(specPath)
+		if readErr != nil {
+			return readErr
+		}
+		enrichedBytes = []byte(strings.TrimRight(string(original), "\n") + "\n\n" + a.registryReferencesMarkdown(selectedBytes))
+	}
+	if err := os.WriteFile(outputPath, enrichedBytes, 0o644); err != nil {
+		return err
+	}
+	_, err = a.store.DB.ExecContext(ctx, `UPDATE spec_enrichments SET status='succeeded', selected_modules_json=?, registry_references_path=?, updated_at=? WHERE id=?`, string(selectedBytes), registryRefsPath, now(), job.SubjectID)
+	return err
+}
+
+func (a *App) registryReferencesMarkdown(selected []byte) string {
+	var ids []string
+	_ = json.Unmarshal(selected, &ids)
+	if len(ids) == 0 {
+		return "## Registry References\n\nNo registry modules were selected.\n"
+	}
+	lines := []string{"## Registry References", ""}
+	for _, id := range ids {
+		mod, err := getSingle(a.store.DB, `SELECT name,version,capabilities_json,ports_json,registry_decision,supersedes_module_id FROM modules WHERE id=?`, id)
+		if err != nil {
+			continue
+		}
+		lines = append(lines,
+			fmt.Sprintf("- **%s@%s**", asString(mod["name"]), asString(mod["version"])),
+			fmt.Sprintf("  - Why it applies: registry module selected for matching capability `%s`.", compactJSON(mod["capabilitiesJson"])),
+			fmt.Sprintf("  - Ports/capabilities: `%s`", compactJSON(mod["portsJson"])),
+			"  - Expected integration point: wire through the composition or implementation layer that owns the matching capability.",
+			fmt.Sprintf("  - Replacement/variant notes: decision `%s`, supersedes `%s`.", asString(mod["registryDecision"]), asString(mod["supersedesModuleId"])),
+		)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func compactJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func (a *App) completeCompositionClarifier(ctx context.Context, job Job) error {
+	b, err := os.ReadFile(filepath.Join(job.OutputPath, "questions.json"))
+	if err != nil || !json.Valid(b) {
+		b = []byte(`[{"id":"goal","question":"What outcome should this composition optimize for?"}]`)
+	}
+	_, err = a.store.DB.ExecContext(ctx, `UPDATE compositions SET status='awaiting_answers', questions_json=?, updated_at=? WHERE id=?`, string(b), now(), job.SubjectID)
+	return err
+}
+
+func (a *App) completeCompositionCompile(ctx context.Context, job Job) error {
+	root := filepath.Join(a.cfg.DataDir, "compositions", job.SubjectID)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	blueprintBytes, err := os.ReadFile(filepath.Join(job.OutputPath, "blueprint.json"))
+	if err != nil || !json.Valid(blueprintBytes) {
+		blueprintBytes = []byte(`{"nodes":[],"edges":[]}`)
+	}
+	specBytes, err := os.ReadFile(filepath.Join(job.OutputPath, "implementation-spec.md"))
+	if err != nil {
+		specBytes = []byte("# Composition Implementation Spec\n\n## Registry References\n\nGenerated from selected registry modules.\n")
+	}
+	blueprintPath := filepath.Join(root, "blueprint.json")
+	specPath := filepath.Join(root, "implementation-spec.md")
+	if err := os.WriteFile(blueprintPath, blueprintBytes, 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(specPath, specBytes, 0o644); err != nil {
+		return err
+	}
+	_, err = a.store.DB.ExecContext(ctx, `UPDATE compositions SET status='compiled', blueprint_path=?, spec_path=?, updated_at=? WHERE id=?`, blueprintPath, specPath, now(), job.SubjectID)
+	return err
 }
 
 //go:embed templates/prompts/*.tmpl
@@ -554,6 +750,21 @@ func (a *App) CompleteJob(ctx context.Context, id string, exitCode int, errorCod
 			} else {
 				errorCode = "candidate_report.invalid"
 			}
+		}
+	}
+	if status == "succeeded" && job.Role == "spec_enrichment" {
+		if err := a.completeSpecEnrichment(ctx, job); err != nil {
+			status, errorCode = "failed", "artifact.write_failed"
+		}
+	}
+	if status == "succeeded" && job.Role == "composition_clarifier" {
+		if err := a.completeCompositionClarifier(ctx, job); err != nil {
+			status, errorCode = "failed", "artifact.write_failed"
+		}
+	}
+	if status == "succeeded" && job.Role == "blueprint_compiler" {
+		if err := a.completeCompositionCompile(ctx, job); err != nil {
+			status, errorCode = "failed", "artifact.write_failed"
 		}
 	}
 	_, err = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status=?, exit_code=?, error_code=?, finished_at=? WHERE id=?`, status, exitCode, nullable(errorCode), now(), id)

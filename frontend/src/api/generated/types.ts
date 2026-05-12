@@ -1,4 +1,4 @@
-// Generated from openapi.yaml sha256:09b8e092021ead2eb1dadf82706e7f8b092feda186123b29fb04e8b9c0ff46a6
+// Generated from openapi.yaml sha256:842200ce45c6be9d89e8707611ce4fa08b1eda89606daaa7b8ba68129836c777
 export type APIRecord = Record<string, unknown>;
 
 export interface ListEnvelope<T = APIRecord> {
@@ -10,6 +10,7 @@ export interface Repository {
   name: string;
   sourceType: 'local_path' | 'git_url';
   sourceUri: string;
+  sourceCheckoutPath: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -41,6 +42,9 @@ export interface Candidate {
   testsFoundJson?: string[] | string;
   missingTestsJson?: string[] | string;
   portsJson?: APIRecord;
+  comparedModuleId?: string;
+  registryDecision?: 'add' | 'replace' | 'keep-as-variant' | 'drop';
+  architectureScoreJson?: APIRecord;
   userReason?: string;
 }
 
@@ -54,6 +58,11 @@ export interface ModuleRecord {
   moduleKind: string;
   capabilitiesJson: string[] | string;
   portsJson: APIRecord;
+  supersedesModuleId?: string;
+  supersededByModuleId?: string;
+  registryDecision?: 'add' | 'replace' | 'keep-as-variant' | 'drop';
+  architectureScoreJson?: APIRecord;
+  sourceCheckoutPath?: string;
   testStatus: string;
   docsPath: string;
   availableInWorkbench: number;
@@ -99,4 +108,31 @@ export interface Blueprint {
   targetLanguage: string;
   outputKind: string;
   packageName: string;
+}
+
+export interface SpecEnrichment {
+  id: string;
+  specPath: string;
+  outputPath: string;
+  artifactRoot: string;
+  status: 'created' | 'queued' | 'running' | 'succeeded' | 'failed';
+  selectedModulesJson?: string[] | string;
+  registryReferencesPath?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Composition {
+  id: string;
+  name: string;
+  intent: string;
+  selectedModulesJson: string[] | string;
+  flowLayoutPath: string;
+  status: 'draft' | 'clarifying' | 'awaiting_answers' | 'ready_to_compile' | 'compiling' | 'compiled' | 'failed';
+  questionsJson?: Array<{ id?: string; question?: string }>;
+  answersJson?: APIRecord;
+  blueprintPath?: string;
+  specPath?: string;
+  createdAt: string;
+  updatedAt: string;
 }

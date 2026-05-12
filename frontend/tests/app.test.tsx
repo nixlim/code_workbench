@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { App } from '../src/app/App';
 
@@ -10,16 +10,26 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
   vi.restoreAllMocks();
 });
 
 it('renders all primary screens without authentication', async () => {
   render(<App />);
-  expect(screen.getAllByText('Repositories').length).toBeGreaterThan(0);
-  expect(screen.getByText('Sessions')).toBeInTheDocument();
-  expect(screen.getByText('Candidates')).toBeInTheDocument();
+  expect(screen.getAllByText('Registry & Code Extraction').length).toBeGreaterThan(0);
+  expect(screen.getByText('Spec Enrichment')).toBeInTheDocument();
+  expect(screen.getByText('Freeform Composition')).toBeInTheDocument();
   expect(screen.getByText('Modules')).toBeInTheDocument();
-  expect(screen.getByText('Workbench')).toBeInTheDocument();
-  expect(screen.getByText('Blueprints')).toBeInTheDocument();
   expect(screen.getByText('Agent Jobs')).toBeInTheDocument();
+});
+
+it('blocks registry extraction until a candidate is approved', () => {
+  render(<App />);
+  expect(screen.getByText('Create extraction plan')).toBeDisabled();
+});
+
+it('blocks composition compile before clarification answers are saved', () => {
+  render(<App />);
+  fireEvent.click(screen.getAllByText('Freeform Composition')[0]);
+  expect(screen.getByText('Compile blueprint and spec')).toBeDisabled();
 });

@@ -1,0 +1,17 @@
+# Spec enrichment
+
+Job: {{.JobID}}
+Subject: {{.SubjectType}} {{.SubjectID}}
+
+Read the input spec and registry module snapshot from {{.WorkspaceReadRoot}}.
+
+## Output contract
+
+{{.OutputContract}}
+
+Write only under {{.OutputRoot}}.
+
+## Safety rules
+
+{{.DeniedPathRules}}
+Read only from {{.WorkspaceReadRoot}}. Write only under {{.OutputRoot}}.

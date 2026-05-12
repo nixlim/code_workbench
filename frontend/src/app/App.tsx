@@ -1,23 +1,21 @@
-import { BriefcaseBusiness, Boxes, GitBranch, LayoutDashboard, Network, PlaySquare, Workflow } from 'lucide-react';
+import { Boxes, FileText, GitBranch, PlaySquare, WandSparkles } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import type { AgentJob, Blueprint, Candidate, ModuleRecord, RegistryComparison, Repository, Session } from '../api/generated/types';
+import type { ReactNode } from 'react';
+import type { AgentJob, Candidate, Composition, ModuleRecord, Repository, Session, SpecEnrichment } from '../api/generated/types';
 import { api } from '../api/client';
-import { WorkbenchView } from '../components/workbench/WorkbenchView';
 
-type Screen = 'repositories' | 'sessions' | 'candidates' | 'modules' | 'workbench' | 'blueprints' | 'jobs';
+type Screen = 'registry' | 'spec' | 'composition' | 'modules' | 'jobs';
 
 const screens: Array<{ id: Screen; label: string; icon: React.ComponentType<{ size?: number }> }> = [
-  { id: 'repositories', label: 'Repositories', icon: GitBranch },
-  { id: 'sessions', label: 'Sessions', icon: Workflow },
-  { id: 'candidates', label: 'Candidates', icon: BriefcaseBusiness },
+  { id: 'registry', label: 'Registry & Code Extraction', icon: GitBranch },
+  { id: 'spec', label: 'Spec Enrichment', icon: FileText },
+  { id: 'composition', label: 'Freeform Composition', icon: WandSparkles },
   { id: 'modules', label: 'Modules', icon: Boxes },
-  { id: 'workbench', label: 'Workbench', icon: Network },
-  { id: 'blueprints', label: 'Blueprints', icon: LayoutDashboard },
   { id: 'jobs', label: 'Agent Jobs', icon: PlaySquare }
 ];
 
 export function App() {
-  const [screen, setScreen] = useState<Screen>('repositories');
+  const [screen, setScreen] = useState<Screen>('registry');
   const [error, setError] = useState('');
 
   return (
@@ -38,169 +36,206 @@ export function App() {
       </aside>
       <main>
         {error && <div className="error">{error}</div>}
-        {screen === 'repositories' && <Repositories onError={setError} />}
-        {screen === 'sessions' && <Sessions onError={setError} />}
-        {screen === 'candidates' && <Candidates onError={setError} />}
+        {screen === 'registry' && <RegistryExtractionWizard onError={setError} />}
+        {screen === 'spec' && <SpecEnrichmentWizard onError={setError} />}
+        {screen === 'composition' && <CompositionWizard onError={setError} />}
         {screen === 'modules' && <Modules onError={setError} />}
-        {screen === 'workbench' && <WorkbenchView onError={setError} />}
-        {screen === 'blueprints' && <Blueprints onError={setError} />}
         {screen === 'jobs' && <Jobs onError={setError} />}
       </main>
     </div>
   );
 }
 
-function Repositories({ onError }: { onError: (value: string) => void }) {
-  const [items, setItems] = useState<Repository[]>([]);
-  const [sourceUri, setSourceUri] = useState('');
+function RegistryExtractionWizard({ onError }: { onError: (value: string) => void }) {
   const [sourceType, setSourceType] = useState<'local_path' | 'git_url'>('local_path');
-  const load = () => api.list<Repository>('/api/repositories').then((r) => setItems(r.items)).catch((e) => onError(String(e.message)));
-  useEffect(() => { void load(); }, []);
-  return (
-    <section>
-      <Header title="Repositories" />
-      <form className="toolbar" onSubmit={(e) => { e.preventDefault(); api.post('/api/repositories', { sourceType, sourceUri }).then(load).catch((err) => onError(err.message)); }}>
-        <select value={sourceType} onChange={(e) => setSourceType(e.target.value as 'local_path' | 'git_url')}>
-          <option value="local_path">Local path</option>
-          <option value="git_url">Git URL</option>
-        </select>
-        <input value={sourceUri} onChange={(e) => setSourceUri(e.target.value)} placeholder="Repository path or URL" />
-        <button type="submit">Register</button>
-      </form>
-      <Table rows={items} columns={['name', 'sourceType', 'sourceUri', 'createdAt']} />
-    </section>
-  );
-}
-
-function Sessions({ onError }: { onError: (value: string) => void }) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [repos, setRepos] = useState<Repository[]>([]);
-  const [repoId, setRepoId] = useState('');
+  const [sourceUri, setSourceUri] = useState('');
+  const [repo, setRepo] = useState<Repository | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [intent, setIntent] = useState('');
-  const load = () => {
-    api.list<Session>('/api/sessions').then((r) => setSessions(r.items)).catch((e) => onError(e.message));
-    api.list<Repository>('/api/repositories').then((r) => { setRepos(r.items); setRepoId((prev) => prev || r.items[0]?.id || ''); }).catch(() => undefined);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [reason, setReason] = useState('approved for extraction');
+  const [planId, setPlanId] = useState('');
+  const approvedIds = useMemo(() => candidates.filter((c) => c.status === 'approved').map((c) => c.id), [candidates]);
+
+  const loadCandidates = (sessionId = session?.id) => {
+    if (!sessionId) return Promise.resolve();
+    return api.list<Candidate>(`/api/candidates?sessionId=${encodeURIComponent(sessionId)}`).then((r) => setCandidates(r.items)).catch((e) => onError(e.message));
   };
-  useEffect(() => { void load(); }, []);
-  const nextAction = (s: Session) => s.phase === 'awaiting_user_intent' ? 'Record intent' : s.phase === 'ready_for_analysis' ? 'Queue analysis' : 'Review status';
+  const begin = async () => {
+    const saved = await api.post<Repository>('/api/repositories', { sourceType, sourceUri });
+    setRepo(saved);
+    const created = await api.post<Session>('/api/sessions', { repositoryId: saved.id });
+    setSession(created);
+    setCandidates([]);
+  };
+  const scan = async () => {
+    if (!session) return;
+    const updated = await api.post<Session>(`/api/sessions/${session.id}/intent`, { specificFunctionality: intent, allowAgentDiscovery: true, expectedUpdatedAt: session.updatedAt });
+    setSession(updated);
+    await api.post<AgentJob>(`/api/sessions/${session.id}/analysis-jobs`, {});
+  };
+  const decide = (candidate: Candidate, action: 'approve' | 'reject' | 'defer' | 'rescan') => {
+    void api.post<Candidate>(`/api/candidates/${candidate.id}/${action}`, { reason }).then(() => loadCandidates(candidate.sessionId)).catch((e) => onError(e.message));
+  };
+  const createPlan = async () => {
+    if (!session || approvedIds.length === 0) return;
+    const plan = await api.post<{ id: string }>('/api/extraction-plans', { sessionId: session.id, approvedCandidateIds: approvedIds, rejectedCandidateIds: candidates.filter((c) => c.status === 'rejected').map((c) => c.id) });
+    setPlanId(plan.id);
+  };
+
   return (
     <section>
-      <Header title="Sessions" />
-      <div className="toolbar">
-        <select value={repoId} onChange={(e) => setRepoId(e.target.value)}>{repos.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select>
-        <button onClick={() => api.post('/api/sessions', { repositoryId: repoId }).then(load).catch((e) => onError(e.message))}>Create</button>
-        <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Extraction intent" />
-      </div>
-      <div className="stack">
-        {sessions.map((s) => {
-          const canSaveIntent = s.phase === 'awaiting_user_intent' || s.phase === 'needs_user_input';
-          const canQueueAnalysis = s.phase === 'ready_for_analysis';
-          return (
-            <article className="row-card" key={s.id}>
-              <strong>{s.repoName}</strong><span>{s.phase}</span><span>{s.activeJobRole ?? 'No active job'}</span><span>{nextAction(s)}</span><span>{s.updatedAt}</span>
-              <button disabled={!canSaveIntent} onClick={() => api.post(`/api/sessions/${s.id}/intent`, { specificFunctionality: intent, allowAgentDiscovery: true, expectedUpdatedAt: s.updatedAt }).then(load).catch((e) => onError(e.message))}>Save Intent</button>
-              <button disabled={!canQueueAnalysis} onClick={() => api.post(`/api/sessions/${s.id}/analysis-jobs`, {}).then(load).catch((e) => onError(e.message))}>Queue Analysis</button>
-            </article>
-          );
-        })}
+      <Header title="Registry & Code Extraction" />
+      <div className="wizard-grid">
+        <Panel title="1. Source">
+          <div className="toolbar">
+            <select value={sourceType} onChange={(e) => setSourceType(e.target.value as 'local_path' | 'git_url')}>
+              <option value="local_path">Local path</option>
+              <option value="git_url">Git URL</option>
+            </select>
+            <input value={sourceUri} onChange={(e) => setSourceUri(e.target.value)} placeholder="Repository path or URL" />
+            <button onClick={() => begin().catch((e) => onError(e.message))}>Import to .sources</button>
+          </div>
+          {repo && <div className="notice">{repo.name} stored at {repo.sourceCheckoutPath}</div>}
+        </Panel>
+        <Panel title="2. Scan candidates">
+          <div className="toolbar">
+            <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Reusable functionality to extract" />
+            <button disabled={!session} onClick={() => scan().catch((e) => onError(e.message))}>Start candidate scan</button>
+            <button disabled={!session} onClick={() => void loadCandidates()}>Refresh candidates</button>
+          </div>
+          {session && <div className="notice">{session.repoName} {session.phase}</div>}
+        </Panel>
+        <Panel title="3. Compare and approve">
+          <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Decision reason" />
+          <div className="stack">
+            {candidates.map((candidate) => (
+              <article className="row-card" key={candidate.id}>
+                <strong>{candidate.proposedName}</strong>
+                <span>{candidate.status}</span>
+                <span>{candidate.registryDecision ?? 'add'}</span>
+                <span>{candidate.comparedModuleId ?? 'new registry module'}</span>
+                <p>{candidate.description}</p>
+                <button disabled={candidate.registryDecision === 'drop'} onClick={() => decide(candidate, 'approve')}>Approve</button>
+                <button onClick={() => decide(candidate, 'reject')}>Drop</button>
+                <button onClick={() => decide(candidate, 'defer')}>Keep as variant later</button>
+                <button onClick={() => decide(candidate, 'rescan')}>Rescan</button>
+              </article>
+            ))}
+          </div>
+        </Panel>
+        <Panel title="4. Extraction">
+          <div className="toolbar">
+            <button disabled={approvedIds.length === 0} onClick={() => createPlan().catch((e) => onError(e.message))}>Create extraction plan</button>
+            <button disabled={!planId} onClick={() => api.post(`/api/extraction-plans/${planId}/jobs`, {}).catch((e) => onError(e.message))}>Run extraction job</button>
+          </div>
+          {approvedIds.length === 0 && <div className="notice">Extraction is blocked until at least one candidate is approved.</div>}
+          {planId && <div className="notice">Plan {planId}</div>}
+        </Panel>
       </div>
     </section>
   );
 }
 
-function Candidates({ onError }: { onError: (value: string) => void }) {
-  const [items, setItems] = useState<Candidate[]>([]);
-  const [status, setStatus] = useState('');
-  const [sessionId, setSessionId] = useState('');
-  const [repositoryId, setRepositoryId] = useState('');
-  const [risk, setRisk] = useState('');
-  const [confidence, setConfidence] = useState('');
-  const [capability, setCapability] = useState('');
-  const [reason, setReason] = useState('');
-  const [source, setSource] = useState<{ path: string; content: string } | null>(null);
-  const query = useMemo(() => {
-    const params = new URLSearchParams();
-    if (sessionId) params.set('sessionId', sessionId);
-    if (repositoryId) params.set('repositoryId', repositoryId);
-    if (status) params.set('status', status);
-    if (risk) params.set('extractionRisk', risk);
-    if (confidence) params.set('confidence', confidence);
-    if (capability) params.set('capability', capability);
-    const value = params.toString();
-    return value ? `?${value}` : '';
-  }, [sessionId, repositoryId, status, risk, confidence, capability]);
-  const load = () => api.list<Candidate>(`/api/candidates${query}`).then((r) => setItems(r.items)).catch((e) => onError(e.message));
-  useEffect(() => { void load(); }, [query]);
-  const grouped = useMemo(() => {
-    const result = new Map<string, Candidate[]>();
-    for (const item of items) {
-      result.set(item.sessionId, [...(result.get(item.sessionId) ?? []), item]);
-    }
-    return result;
-  }, [items]);
-  const sourcePath = (c: Candidate) => Array.isArray(c.sourcePathsJson) ? c.sourcePathsJson[0] : String(c.sourcePathsJson ?? '').replace(/^\[?"?|"?\]?$/g, '');
-  const viewSource = (c: Candidate) => {
-    const path = sourcePath(c);
-    if (!path) return;
-    api.get<{ path: string; content: string }>(`/api/sessions/${c.sessionId}/files?path=${encodeURIComponent(path)}`).then(setSource).catch((e) => onError(e.message));
-  };
-  const action = (id: string, name: string) => api.post(`/api/candidates/${id}/${name}`, { reason }).then(load).catch((e) => onError(e.message));
+function SpecEnrichmentWizard({ onError }: { onError: (value: string) => void }) {
+  const [specPath, setSpecPath] = useState('');
+  const [enrichment, setEnrichment] = useState<SpecEnrichment | null>(null);
+  const create = () => api.post<SpecEnrichment>('/api/spec-enrichments', { specPath }).then(setEnrichment).catch((e) => onError(e.message));
+  const start = () => enrichment && api.post<AgentJob>(`/api/spec-enrichments/${enrichment.id}/jobs`, {}).then(() => api.get<SpecEnrichment>(`/api/spec-enrichments/${enrichment.id}`).then(setEnrichment)).catch((e) => onError(e.message));
   return (
     <section>
-      <Header title="Candidates" />
-      <div className="toolbar">
-        <input value={sessionId} onChange={(e) => setSessionId(e.target.value)} placeholder="Session" />
-        <input value={repositoryId} onChange={(e) => setRepositoryId(e.target.value)} placeholder="Repository" />
-        <select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option><option>proposed</option><option>approved</option><option>rejected</option><option>duplicate_detected</option></select>
-        <select value={risk} onChange={(e) => setRisk(e.target.value)}><option value="">All risks</option><option>low</option><option>medium</option><option>high</option></select>
-        <select value={confidence} onChange={(e) => setConfidence(e.target.value)}><option value="">All confidence</option><option>low</option><option>medium</option><option>high</option></select>
-        <input value={capability} onChange={(e) => setCapability(e.target.value)} placeholder="Capability" />
-        <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Decision reason" />
+      <Header title="Spec Enrichment" />
+      <Panel title="Spec file">
+        <div className="toolbar">
+          <input value={specPath} onChange={(e) => setSpecPath(e.target.value)} placeholder="/absolute/path/to/spec.md" />
+          <button onClick={create}>Create enrichment</button>
+          <button disabled={!enrichment} onClick={start}>Select registry references</button>
+          <button disabled={!enrichment} onClick={() => enrichment && api.get<SpecEnrichment>(`/api/spec-enrichments/${enrichment.id}`).then(setEnrichment).catch((e) => onError(e.message))}>Refresh</button>
+        </div>
+        {enrichment && <Table rows={[enrichment]} columns={['status', 'specPath', 'outputPath', 'selectedModulesJson']} />}
+      </Panel>
+    </section>
+  );
+}
+
+function CompositionWizard({ onError }: { onError: (value: string) => void }) {
+  const [modules, setModules] = useState<ModuleRecord[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [intent, setIntent] = useState('');
+  const [composition, setComposition] = useState<Composition | null>(null);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  useEffect(() => { api.list<ModuleRecord>('/api/workbench/palette').then((r) => setModules(r.items)).catch((e) => onError(e.message)); }, []);
+  const toggle = (id: string) => setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  const create = () => {
+    const flowLayout = { nodes: selected.map((id, index) => ({ id, position: { x: 80 + index * 180, y: 120 }, data: { moduleId: id } })), edges: [] };
+    return api.post<Composition>('/api/compositions', { intent, selectedModuleIds: selected, flowLayout }).then(setComposition).catch((e) => onError(e.message));
+  };
+  const refresh = () => composition && api.get<Composition>(`/api/compositions/${composition.id}`).then(setComposition).catch((e) => onError(e.message));
+  const questions = Array.isArray(composition?.questionsJson) ? composition.questionsJson : [];
+  const allAnswered = questions.length > 0 && questions.every((q) => q.id && answers[q.id]);
+  return (
+    <section>
+      <Header title="Freeform Composition" />
+      <div className="wizard-grid">
+        <Panel title="1. Select components">
+          <div className="module-list">
+            {modules.map((module) => (
+              <label key={module.id}>
+                <input type="checkbox" checked={selected.includes(module.id)} onChange={() => toggle(module.id)} />
+                <span>{module.name}@{module.version}</span>
+              </label>
+            ))}
+          </div>
+        </Panel>
+        <Panel title="2. Clarify intent">
+          <div className="toolbar">
+            <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Composition intent" />
+            <button disabled={selected.length === 0 || !intent} onClick={create}>Create composition</button>
+            <button disabled={!composition} onClick={() => composition && api.post(`/api/compositions/${composition.id}/clarification-jobs`, {}).then(refresh).catch((e) => onError(e.message))}>Ask clarifying questions</button>
+            <button disabled={!composition} onClick={() => void refresh()}>Refresh</button>
+          </div>
+          {composition && <div className="notice">{composition.status}</div>}
+        </Panel>
+        <Panel title="3. Answers">
+          {questions.length === 0 && <div className="notice">Questions appear after the clarification job succeeds.</div>}
+          {questions.map((question) => (
+            <label className="answer-row" key={question.id}>
+              <span>{question.question}</span>
+              <input value={answers[question.id ?? ''] ?? ''} onChange={(e) => question.id && setAnswers((current) => ({ ...current, [question.id as string]: e.target.value }))} />
+            </label>
+          ))}
+          <button disabled={!composition || !allAnswered} onClick={() => composition && api.post<Composition>(`/api/compositions/${composition.id}/answers`, { answers }).then(setComposition).catch((e) => onError(e.message))}>Save answers</button>
+        </Panel>
+        <Panel title="4. Compile">
+          <button disabled={!composition || composition.status !== 'ready_to_compile'} onClick={() => composition && api.post(`/api/compositions/${composition.id}/compile-jobs`, {}).then(refresh).catch((e) => onError(e.message))}>Compile blueprint and spec</button>
+          {composition?.blueprintPath && <div className="notice">{composition.blueprintPath}</div>}
+          {composition?.specPath && <div className="notice">{composition.specPath}</div>}
+        </Panel>
       </div>
-      {[...grouped.entries()].map(([sessionId, candidates]) => (
-        <div key={sessionId}><h2>{sessionId}</h2>{candidates.map((c) => <article className="row-card" key={c.id}><strong>{c.proposedName}</strong><span>{c.status}</span><span>{c.extractionRisk}</span><span>{c.confidence}</span><p>{c.description}</p><button onClick={() => action(c.id, 'approve')}>Approve</button><button onClick={() => action(c.id, 'reject')}>Reject</button><button onClick={() => action(c.id, 'defer')}>Defer</button><button onClick={() => action(c.id, 'duplicate')}>Duplicate</button><button onClick={() => action(c.id, 'rescan')}>Rescan</button><button onClick={() => viewSource(c)}>Source</button><button onClick={() => api.patch(`/api/candidates/${c.id}`, { description: `${c.description} ` }).then(load).catch((e) => onError(e.message))}>Modify</button></article>)}</div>
-      ))}
-      {source && <pre className="source-view">{source.path}{'\n\n'}{source.content}</pre>}
     </section>
   );
 }
 
 function Modules({ onError }: { onError: (value: string) => void }) {
   const [items, setItems] = useState<ModuleRecord[]>([]);
-  const [classification, setClassification] = useState('');
   useEffect(() => { api.list<ModuleRecord>('/api/modules').then((r) => setItems(r.items)).catch((e) => onError(e.message)); }, []);
-  return <section><Header title="Modules" />{classification && <div className="notice">{classification}</div>}<Table rows={items} columns={['name', 'version', 'sourceRepositoryId', 'sourceCandidateId', 'language', 'moduleKind', 'capabilitiesJson', 'portsJson', 'testStatus', 'docsPath', 'availableInWorkbench']} />{items.map((m) => <button key={m.id} onClick={() => api.post<RegistryComparison>(`/api/modules/${m.id}/compare`, {}).then((r) => setClassification(r.classification)).catch((e) => onError(e.message))}>Compare {m.name}</button>)}</section>;
-}
-
-function Blueprints({ onError }: { onError: (value: string) => void }) {
-  const [items, setItems] = useState<Blueprint[]>([]);
-  const [validationReport, setValidationReport] = useState<unknown>(null);
-  const [wiringJob, setWiringJob] = useState<AgentJob | null>(null);
-  const load = () => api.list<Blueprint>('/api/blueprints').then((r) => setItems(r.items)).catch((e) => onError(e.message));
-  useEffect(() => { void load(); }, []);
-  return <section><Header title="Blueprints" /><Table rows={items} columns={['name', 'validationStatus', 'targetLanguage', 'outputKind', 'packageName']} />{validationReport !== null && <pre className="source-view">{JSON.stringify(validationReport, null, 2)}</pre>}{wiringJob && <div className="notice">{wiringJob.role} {wiringJob.status}</div>}{items.map((b) => <article className="row-card" key={b.id}><button onClick={() => api.post<Blueprint & { validationReport?: unknown }>(`/api/blueprints/${b.id}/validate`).then((result) => { setValidationReport(result.validationReport ?? null); return load(); }).catch((e) => onError(e.message))}>Validate</button><button onClick={() => api.post<AgentJob>(`/api/blueprints/${b.id}/wiring-jobs`).then(setWiringJob).catch((e) => onError(e.message))}>Generate Code</button></article>)}</section>;
+  return <section><Header title="Modules" /><Table rows={items} columns={['name', 'version', 'registryDecision', 'supersedesModuleId', 'supersededByModuleId', 'sourceCheckoutPath', 'testStatus', 'availableInWorkbench']} /></section>;
 }
 
 function Jobs({ onError }: { onError: (value: string) => void }) {
   const [items, setItems] = useState<AgentJob[]>([]);
   const [attachCommand, setAttachCommand] = useState('');
   const load = () => api.list<AgentJob>('/api/agent-jobs').then((r) => setItems(r.items)).catch((e) => onError(e.message));
-  const runningIds = useMemo(() => items.filter((j) => j.status === 'running').map((j) => j.id).sort().join(','), [items]);
   useEffect(() => { load(); }, []);
-  useEffect(() => {
-    if (!runningIds) return;
-    const id = window.setInterval(() => {
-      void Promise.all(runningIds.split(',').map((jobId) => api.get<AgentJob>(`/api/agent-jobs/${jobId}`))).then((fresh) => {
-        setItems((current) => current.map((job) => fresh.find((item) => item.id === job.id) ?? job));
-      }).catch((e) => onError(e.message));
-    }, 5000);
-    return () => window.clearInterval(id);
-  }, [runningIds]);
-  return <section><Header title="Agent Jobs" />{attachCommand && <div className="notice">{attachCommand}</div>}<Table rows={items} columns={['role', 'provider', 'status', 'subjectType', 'subjectId', 'tmuxSessionName', 'createdAt', 'startedAt', 'finishedAt']} />{items.map((j) => <article className="row-card" key={j.id}><button onClick={() => api.post<{ attachCommand: string }>(`/api/agent-jobs/${j.id}/open`).then((r) => setAttachCommand(r.attachCommand)).catch((e) => onError(e.message))}>Open</button><button onClick={() => api.post(`/api/agent-jobs/${j.id}/cancel`).then(load).catch((e) => onError(e.message))}>Cancel</button></article>)}</section>;
+  return <section><Header title="Agent Jobs" />{attachCommand && <div className="notice">{attachCommand}</div>}<Table rows={items} columns={['role', 'provider', 'status', 'subjectType', 'subjectId', 'tmuxSessionName', 'createdAt', 'finishedAt']} />{items.map((j) => <article className="row-card" key={j.id}><button onClick={() => api.post<{ attachCommand: string }>(`/api/agent-jobs/${j.id}/open`).then((r) => setAttachCommand(r.attachCommand)).catch((e) => onError(e.message))}>Open</button><button onClick={() => api.post(`/api/agent-jobs/${j.id}/cancel`).then(load).catch((e) => onError(e.message))}>Cancel</button></article>)}</section>;
 }
 
 function Header({ title }: { title: string }) {
   return <header className="page-header"><h2>{title}</h2></header>;
+}
+
+function Panel({ title, children }: { title: string; children: ReactNode }) {
+  return <section className="panel"><h3>{title}</h3>{children}</section>;
 }
 
 function Table<T extends object>({ rows, columns }: { rows: T[]; columns: string[] }) {

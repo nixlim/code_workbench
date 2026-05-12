@@ -112,9 +112,9 @@ func (c Config) Providers() []string {
 
 func (c Config) TimeoutSeconds(role string) int {
 	switch role {
-	case "repo_analysis", "module_test", "documentation":
+	case "repo_analysis", "candidate_scan", "candidate_registry_compare", "module_test", "documentation", "spec_enrichment", "composition_clarifier", "composition_spec_writer":
 		return 1800
-	case "extraction", "wiring":
+	case "extraction", "module_extraction", "registry_update", "wiring", "blueprint_compiler":
 		return 3600
 	case "registry_comparison", "blueprint_validation":
 		return 900
@@ -125,11 +125,11 @@ func (c Config) TimeoutSeconds(role string) int {
 
 func (c Config) LimitForRole(role string) int {
 	switch role {
-	case "repo_analysis":
+	case "repo_analysis", "candidate_scan", "candidate_registry_compare", "spec_enrichment", "composition_clarifier":
 		return c.AnalysisLimit
-	case "extraction":
+	case "extraction", "module_extraction", "registry_update":
 		return c.ExtractionLimit
-	case "wiring":
+	case "wiring", "blueprint_compiler", "composition_spec_writer":
 		return c.WiringLimit
 	default:
 		return 1

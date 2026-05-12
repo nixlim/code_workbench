@@ -1,0 +1,17 @@
+# Composition clarification
+
+Job: {{.JobID}}
+Subject: {{.SubjectType}} {{.SubjectID}}
+
+Read composition.json and flow-layout.json from {{.WorkspaceReadRoot}}.
+
+## Output contract
+
+{{.OutputContract}}
+
+Write only under {{.OutputRoot}}.
+
+## Safety rules
+
+{{.DeniedPathRules}}
+Read only from {{.WorkspaceReadRoot}}. Write only under {{.OutputRoot}}.

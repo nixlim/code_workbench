@@ -27,7 +27,7 @@ func TestOpenCreatesDatabaseDirectoriesAndSchema(t *testing.T) {
 	if err := migrate(context.Background(), store.DB); err != nil {
 		t.Fatalf("second migrate failed: %v", err)
 	}
-	for _, table := range []string{"repositories", "repo_sessions", "candidates", "extraction_plans", "modules", "blueprints", "agent_jobs", "settings"} {
+	for _, table := range []string{"repositories", "repo_sessions", "candidates", "extraction_plans", "modules", "blueprints", "agent_jobs", "spec_enrichments", "compositions", "settings"} {
 		var name string
 		if err := store.DB.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
 			t.Fatalf("table %s missing: %v", table, err)

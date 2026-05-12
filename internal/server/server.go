@@ -114,6 +114,15 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/modules", a.handleRegisterModule)
 	mux.HandleFunc("GET /api/modules/{moduleId}", a.handleGetModule)
 	mux.HandleFunc("POST /api/modules/{moduleId}/compare", a.handleCompareModule)
+	mux.HandleFunc("POST /api/spec-enrichments", a.handleCreateSpecEnrichment)
+	mux.HandleFunc("GET /api/spec-enrichments/{enrichmentId}", a.handleGetSpecEnrichment)
+	mux.HandleFunc("POST /api/spec-enrichments/{enrichmentId}/jobs", a.handleSpecEnrichmentJob)
+	mux.HandleFunc("POST /api/compositions", a.handleCreateComposition)
+	mux.HandleFunc("GET /api/compositions/{compositionId}", a.handleGetComposition)
+	mux.HandleFunc("PATCH /api/compositions/{compositionId}/layout", a.handlePatchCompositionLayout)
+	mux.HandleFunc("POST /api/compositions/{compositionId}/clarification-jobs", a.handleCompositionClarificationJob)
+	mux.HandleFunc("POST /api/compositions/{compositionId}/answers", a.handleCompositionAnswers)
+	mux.HandleFunc("POST /api/compositions/{compositionId}/compile-jobs", a.handleCompositionCompileJob)
 	mux.HandleFunc("GET /api/workbench/palette", a.handlePalette)
 	mux.HandleFunc("POST /api/workbench/validate-edge", a.handleValidateWorkbenchEdge)
 	mux.HandleFunc("POST /api/blueprints", a.handleCreateBlueprint)
@@ -398,6 +407,37 @@ func validSessionTransition(from, to string) bool {
 
 func validGitURL(uri string) bool {
 	return strings.HasPrefix(uri, "https://") || strings.HasPrefix(uri, "ssh://") || regexp.MustCompile(`^git@[^:]+:.+/.+\.git$`).MatchString(uri)
+}
+
+func (a *App) sourceRoot() string {
+	return filepath.Join(filepath.Dir(a.cfg.DataDir), ".sources")
+}
+
+func sourceSlug(sourceType, uri, name string) string {
+	base := name
+	if base == "" {
+		base = strings.TrimSuffix(filepath.Base(uri), ".git")
+	}
+	base = strings.ToLower(base)
+	base = regexp.MustCompile(`[^a-z0-9._-]+`).ReplaceAllString(base, "-")
+	base = strings.Trim(base, ".-_")
+	if base == "" {
+		base = strings.TrimPrefix(sourceType, "source")
+	}
+	return base
+}
+
+func uniqueSourcePath(root, slug string) string {
+	candidate := filepath.Join(root, slug)
+	if _, err := os.Stat(candidate); os.IsNotExist(err) {
+		return candidate
+	}
+	for i := 2; ; i++ {
+		candidate = filepath.Join(root, fmt.Sprintf("%s-%d", slug, i))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
 }
 
 func runGitClone(ctx context.Context, uri, dest string) error {

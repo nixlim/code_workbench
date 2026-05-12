@@ -83,9 +83,19 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 		t.Fatalf("unknown field status=%d body=%v", code, unknown)
 	}
 	repoID := repo["id"].(string)
+	checkoutPath := repo["sourceCheckoutPath"].(string)
+	if filepath.Base(filepath.Dir(checkoutPath)) != ".sources" {
+		t.Fatalf("repository checkout not stored under .sources: %s", checkoutPath)
+	}
+	if _, err := os.Stat(filepath.Join(checkoutPath, "README.md")); err != nil {
+		t.Fatalf("source checkout missing README: %v", err)
+	}
 	code, session := doJSON(t, app, http.MethodPost, "/api/sessions", map[string]any{"repositoryId": repoID})
 	if code != 201 || session["phase"] != "awaiting_user_intent" {
 		t.Fatalf("create session status=%d body=%v", code, session)
+	}
+	if session["checkoutPath"] != checkoutPath {
+		t.Fatalf("session did not use canonical source checkout: %v vs %v", session["checkoutPath"], checkoutPath)
 	}
 	sessionID := session["id"].(string)
 	code, _ = doJSON(t, app, http.MethodPost, "/api/sessions/"+sessionID+"/analysis-jobs", map[string]any{"provider": "fake"})
@@ -294,6 +304,76 @@ func TestPaletteSelectsHighestSemverVersion(t *testing.T) {
 	items := palette["items"].([]any)
 	if len(items) != 1 || items[0].(map[string]any)["version"] != "0.10.0" {
 		t.Fatalf("palette did not select highest semver: %v", palette)
+	}
+}
+
+func TestSpecEnrichmentAndCompositionWorkflow(t *testing.T) {
+	app, repoPath := newTestApp(t)
+	_, repo := doJSON(t, app, http.MethodPost, "/api/repositories", map[string]any{"sourceType": "local_path", "sourceUri": repoPath})
+	_, session := doJSON(t, app, http.MethodPost, "/api/sessions", map[string]any{"repositoryId": repo["id"]})
+	repoID := repo["id"].(string)
+	sessionID := session["id"].(string)
+	ts := now()
+	_, err := app.store.DB.Exec(`INSERT INTO candidates(id,session_id,repository_id,proposed_name,description,module_kind,target_language,confidence,extraction_risk,status,source_paths_json,ports_json,workbench_node_json,report_path,created_at,updated_at) VALUES('cand_enrich',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, sessionID, repoID, "registry-helper", "registry module", "library", "go", "high", "low", "registered", `["README.md"]`, `{"inputs":[{"name":"in","type":"Message"}],"outputs":[{"name":"out","type":"Message"}]}`, `{}`, "report.json", ts, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.store.DB.Exec(`INSERT INTO modules(id,name,version,source_repository_id,source_session_id,source_candidate_id,language,module_kind,import_path,capabilities_json,ports_json,config_schema_path,manifest_path,docs_path,test_status,available_in_workbench,created_at,updated_at) VALUES('mod_enrich','registry-helper','0.1.0',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, repoID, sessionID, "cand_enrich", "go", "library", "example.com/registry", `["registry"]`, `{"inputs":[{"name":"in","type":"Message"}],"outputs":[{"name":"out","type":"Message"}]}`, "config.json", "manifest.json", "docs.json", "passing", 1, ts, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specPath := filepath.Join(filepath.Dir(repoPath), "feature-spec.md")
+	if err := os.WriteFile(specPath, []byte("# Feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, enrichment := doJSON(t, app, http.MethodPost, "/api/spec-enrichments", map[string]any{"specPath": specPath})
+	if code != 201 || enrichment["status"] != "created" {
+		t.Fatalf("enrichment create status=%d body=%v", code, enrichment)
+	}
+	code, enrichJob := doJSON(t, app, http.MethodPost, "/api/spec-enrichments/"+enrichment["id"].(string)+"/jobs", map[string]any{"provider": "fake"})
+	if code != 202 || enrichJob["role"] != "spec_enrichment" {
+		t.Fatalf("enrichment job status=%d body=%v", code, enrichJob)
+	}
+	if err := app.CompleteJob(context.Background(), enrichJob["id"].(string), 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	code, enrichment = doJSON(t, app, http.MethodGet, "/api/spec-enrichments/"+enrichment["id"].(string), nil)
+	if code != 200 || enrichment["status"] != "succeeded" {
+		t.Fatalf("enrichment complete status=%d body=%v", code, enrichment)
+	}
+	enriched, err := os.ReadFile(enrichment["outputPath"].(string))
+	if err != nil || !strings.Contains(string(enriched), "## Registry References") || !strings.Contains(string(enriched), "registry-helper@0.1.0") {
+		t.Fatalf("enriched spec missing registry references err=%v content=%s", err, string(enriched))
+	}
+	code, comp := doJSON(t, app, http.MethodPost, "/api/compositions", map[string]any{"intent": "wire registry helper", "selectedModuleIds": []string{"mod_enrich"}, "flowLayout": map[string]any{"nodes": []any{}, "edges": []any{}}})
+	if code != 201 || comp["status"] != "draft" {
+		t.Fatalf("composition create status=%d body=%v", code, comp)
+	}
+	code, compileEarly := doJSON(t, app, http.MethodPost, "/api/compositions/"+comp["id"].(string)+"/compile-jobs", map[string]any{"provider": "fake"})
+	if code != 409 {
+		t.Fatalf("compile before answers status=%d body=%v", code, compileEarly)
+	}
+	code, clarifyJob := doJSON(t, app, http.MethodPost, "/api/compositions/"+comp["id"].(string)+"/clarification-jobs", map[string]any{"provider": "fake"})
+	if code != 202 || clarifyJob["role"] != "composition_clarifier" {
+		t.Fatalf("clarify job status=%d body=%v", code, clarifyJob)
+	}
+	if err := app.CompleteJob(context.Background(), clarifyJob["id"].(string), 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	code, comp = doJSON(t, app, http.MethodPost, "/api/compositions/"+comp["id"].(string)+"/answers", map[string]any{"answers": map[string]string{"goal": "service composition"}})
+	if code != 200 || comp["status"] != "ready_to_compile" {
+		t.Fatalf("answers status=%d body=%v", code, comp)
+	}
+	code, compileJob := doJSON(t, app, http.MethodPost, "/api/compositions/"+comp["id"].(string)+"/compile-jobs", map[string]any{"provider": "fake"})
+	if code != 202 || compileJob["role"] != "blueprint_compiler" {
+		t.Fatalf("compile job status=%d body=%v", code, compileJob)
+	}
+	if err := app.CompleteJob(context.Background(), compileJob["id"].(string), 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	code, comp = doJSON(t, app, http.MethodGet, "/api/compositions/"+comp["id"].(string), nil)
+	if code != 200 || comp["status"] != "compiled" || comp["blueprintPath"] == "" || comp["specPath"] == "" {
+		t.Fatalf("compiled composition status=%d body=%v", code, comp)
 	}
 }
 

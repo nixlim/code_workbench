@@ -22,6 +22,7 @@ func (a *App) handleCreateRepository(w http.ResponseWriter, r *http.Request) {
 		SourceType    string `json:"sourceType"`
 		SourceURI     string `json:"sourceUri"`
 		DefaultBranch string `json:"defaultBranch"`
+		Rescan        bool   `json:"rescan"`
 	}
 	if err := decodeStrict(r, &req); err != nil {
 		writeErr(w, err)
@@ -33,6 +34,9 @@ func (a *App) handleCreateRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		req.Name = filepath.Base(req.SourceURI)
+		if req.SourceType == "git_url" {
+			req.Name = strings.TrimSuffix(req.Name, ".git")
+		}
 	}
 	if req.SourceType == "local_path" {
 		if len(a.cfg.AllowedRoots) == 0 || !paths.InAllowedRoots(req.SourceURI, a.cfg.AllowedRoots) {
@@ -52,18 +56,43 @@ func (a *App) handleCreateRepository(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, APIError{Status: 400, Code: "path.invalid", Message: "unsupported git URL"})
 		return
 	}
-	id, ts := newID("repo"), now()
-	_, err := a.store.DB.ExecContext(r.Context(), `INSERT INTO repositories(id,name,source_type,source_uri,default_branch,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, id, req.Name, req.SourceType, req.SourceURI, req.DefaultBranch, ts, ts)
-	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
-		existing, _ := getSingle(a.store.DB, `SELECT * FROM repositories WHERE source_type=? AND source_uri=?`, req.SourceType, req.SourceURI)
+	if existing, err := getSingle(a.store.DB, `SELECT * FROM repositories WHERE source_type=? AND source_uri=?`, req.SourceType, req.SourceURI); err == nil && !req.Rescan {
 		writeErr(w, APIError{Status: 409, Code: "repository.duplicate", Message: "repository already registered", Details: map[string]any{"repository": existing}})
 		return
+	}
+	sourceRoot := a.sourceRoot()
+	if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
+		writeErr(w, err)
+		return
+	}
+	slug := sourceSlug(req.SourceType, req.SourceURI, req.Name)
+	checkout := filepath.Join(sourceRoot, slug)
+	if !req.Rescan {
+		checkout = uniqueSourcePath(sourceRoot, slug)
+	} else {
+		_ = os.RemoveAll(checkout)
+	}
+	if req.SourceType == "local_path" {
+		if err := createLocalCheckout(r.Context(), req.SourceURI, checkout); err != nil {
+			_ = os.RemoveAll(checkout)
+			writeErr(w, APIError{Status: 502, Code: "repository.clone_failed", Message: err.Error()})
+			return
+		}
+	} else if err := runGitClone(r.Context(), req.SourceURI, checkout); err != nil {
+		_ = os.RemoveAll(checkout)
+		writeErr(w, APIError{Status: 502, Code: "repository.clone_failed", Message: err.Error()})
+		return
+	}
+	id, ts := newID("repo"), now()
+	_, err := a.store.DB.ExecContext(r.Context(), `INSERT INTO repositories(id,name,source_type,source_uri,source_checkout_path,default_branch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, id, req.Name, req.SourceType, req.SourceURI, checkout, req.DefaultBranch, ts, ts)
+	if err != nil && strings.Contains(err.Error(), "UNIQUE") && req.Rescan {
+		_, err = a.store.DB.ExecContext(r.Context(), `UPDATE repositories SET name=?, source_checkout_path=?, default_branch=?, updated_at=? WHERE source_type=? AND source_uri=?`, req.Name, checkout, req.DefaultBranch, ts, req.SourceType, req.SourceURI)
 	}
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	repo, err := getSingle(a.store.DB, `SELECT * FROM repositories WHERE id=?`, id)
+	repo, err := getSingle(a.store.DB, `SELECT * FROM repositories WHERE source_type=? AND source_uri=?`, req.SourceType, req.SourceURI)
 	one(w, err, 201, repo)
 }
 
@@ -79,8 +108,8 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	var repo struct{ ID, Name, SourceType, SourceURI string }
-	err := a.store.DB.QueryRowContext(r.Context(), `SELECT id,name,source_type,source_uri FROM repositories WHERE id=?`, req.RepositoryID).Scan(&repo.ID, &repo.Name, &repo.SourceType, &repo.SourceURI)
+	var repo struct{ ID, Name, SourceType, SourceURI, SourceCheckoutPath string }
+	err := a.store.DB.QueryRowContext(r.Context(), `SELECT id,name,source_type,source_uri,source_checkout_path FROM repositories WHERE id=?`, req.RepositoryID).Scan(&repo.ID, &repo.Name, &repo.SourceType, &repo.SourceURI, &repo.SourceCheckoutPath)
 	if storage.IsNotFound(err) {
 		writeErr(w, APIError{Status: 404, Code: "resource.not_found", Message: "repository not found"})
 		return
@@ -91,21 +120,18 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	id := newID("sess")
 	sessionRoot := filepath.Join(a.cfg.DataDir, "sessions", id)
-	checkout := filepath.Join(sessionRoot, "repo")
+	checkout := repo.SourceCheckoutPath
 	scratch := filepath.Join(sessionRoot, "scratch")
 	if err := os.MkdirAll(scratch, 0o755); err != nil {
 		writeErr(w, err)
 		return
 	}
-	if repo.SourceType == "local_path" {
-		if err := createLocalCheckout(r.Context(), repo.SourceURI, checkout); err != nil {
-			_ = os.RemoveAll(sessionRoot)
-			writeErr(w, APIError{Status: 502, Code: "repository.clone_failed", Message: err.Error()})
-			return
-		}
-	} else if err := runGitClone(r.Context(), repo.SourceURI, checkout); err != nil {
-		_ = os.RemoveAll(sessionRoot)
-		writeErr(w, APIError{Status: 502, Code: "repository.clone_failed", Message: err.Error()})
+	if checkout == "" {
+		writeErr(w, APIError{Status: 409, Code: "repository.clone_failed", Message: "repository has no source checkout"})
+		return
+	}
+	if info, err := os.Stat(checkout); err != nil || !info.IsDir() {
+		writeErr(w, APIError{Status: 409, Code: "repository.clone_failed", Message: "repository source checkout is missing"})
 		return
 	}
 	ts := now()
@@ -440,6 +466,8 @@ func (a *App) handleRegisterModule(w http.ResponseWriter, r *http.Request) {
 		TestFiles          []string       `json:"testFiles"`
 		Manifest           map[string]any `json:"manifest"`
 		Provenance         map[string]any `json:"provenance"`
+		RegistryDecision   string         `json:"registryDecision"`
+		SupersedesModuleID string         `json:"supersedesModuleId"`
 	}
 	if err := decodeStrict(r, &req); err != nil {
 		writeErr(w, err)
@@ -451,12 +479,19 @@ func (a *App) handleRegisterModule(w http.ResponseWriter, r *http.Request) {
 	if req.TestStatus == "" {
 		req.TestStatus = "not_run"
 	}
+	if req.RegistryDecision == "" {
+		req.RegistryDecision = "add"
+	}
 	if req.Name == "" || req.SourceRepositoryID == "" || req.SourceSessionID == "" || req.SourceCandidateID == "" || req.ImportPath == "" || req.ModuleKind == "" || len(req.Ports) == 0 || len(req.ConfigSchema) == 0 || req.Docs == "" || req.ExtractionJobID == "" || len(req.SourceFiles) == 0 || len(req.TestFiles) == 0 || len(req.Manifest) == 0 || len(req.Provenance) == 0 {
 		writeErr(w, APIError{Status: 422, Code: "module_output.invalid", Message: "module output is incomplete"})
 		return
 	}
 	if req.TestStatus != "not_run" && req.TestStatus != "passing" && req.TestStatus != "failing" {
 		writeErr(w, APIError{Status: 422, Code: "module_output.invalid", Message: "invalid test status"})
+		return
+	}
+	if !validRegistryDecision(req.RegistryDecision) {
+		writeErr(w, APIError{Status: 422, Code: "module_output.invalid", Message: "invalid registry decision"})
 		return
 	}
 	if err := validatePorts(req.Ports); err != nil {
@@ -471,6 +506,18 @@ func (a *App) handleRegisterModule(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	var candidateDecision, comparedModuleID, architectureScore, sourceCheckoutPath string
+	_ = a.store.DB.QueryRow(`SELECT registry_decision,COALESCE(compared_module_id,''),architecture_score_json FROM candidates WHERE id=?`, req.SourceCandidateID).Scan(&candidateDecision, &comparedModuleID, &architectureScore)
+	_ = a.store.DB.QueryRow(`SELECT COALESCE(source_checkout_path,'') FROM repositories WHERE id=?`, req.SourceRepositoryID).Scan(&sourceCheckoutPath)
+	if architectureScore == "" {
+		architectureScore = "{}"
+	}
+	if req.RegistryDecision == "add" && candidateDecision != "" {
+		req.RegistryDecision = candidateDecision
+	}
+	if req.SupersedesModuleID == "" && req.RegistryDecision == "replace" {
+		req.SupersedesModuleID = comparedModuleID
 	}
 	id := newID("mod")
 	root := filepath.Join(a.cfg.DataDir, "modules", id)
@@ -498,9 +545,31 @@ func (a *App) handleRegisterModule(w http.ResponseWriter, r *http.Request) {
 		available = 1
 	}
 	ts := now()
-	_, err = a.store.DB.Exec(`INSERT INTO modules(id,name,version,source_repository_id,source_session_id,source_candidate_id,language,module_kind,import_path,capabilities_json,ports_json,config_schema_path,manifest_path,docs_path,test_status,available_in_workbench,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, req.Name, version, req.SourceRepositoryID, req.SourceSessionID, req.SourceCandidateID, req.Language, req.ModuleKind, req.ImportPath, jsonText(req.Capabilities), jsonText(req.Ports), configPath, manifestPath, docsPath, req.TestStatus, available, ts, ts)
+	err = storage.WithTx(r.Context(), a.store.DB, func(tx *sql.Tx) error {
+		_, err = tx.Exec(`INSERT INTO modules(id,name,version,source_repository_id,source_session_id,source_candidate_id,language,module_kind,import_path,capabilities_json,ports_json,config_schema_path,manifest_path,docs_path,supersedes_module_id,registry_decision,architecture_score_json,source_checkout_path,test_status,available_in_workbench,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, req.Name, version, req.SourceRepositoryID, req.SourceSessionID, req.SourceCandidateID, req.Language, req.ModuleKind, req.ImportPath, jsonText(req.Capabilities), jsonText(req.Ports), configPath, manifestPath, docsPath, nullable(req.SupersedesModuleID), req.RegistryDecision, architectureScore, sourceCheckoutPath, req.TestStatus, available, ts, ts)
+		if err != nil {
+			return err
+		}
+		if req.SupersedesModuleID != "" {
+			_, err = tx.Exec(`UPDATE modules SET superseded_by_module_id=?, updated_at=? WHERE id=?`, id, ts, req.SupersedesModuleID)
+			if err != nil {
+				return err
+			}
+		}
+		_, err = tx.Exec(`UPDATE candidates SET status='registered', updated_at=? WHERE id=?`, ts, req.SourceCandidateID)
+		return err
+	})
 	item, err := getSingle(a.store.DB, `SELECT * FROM modules WHERE id=?`, id)
 	one(w, err, 201, item)
+}
+
+func validRegistryDecision(value string) bool {
+	switch value {
+	case "add", "replace", "keep-as-variant", "drop":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) validateModuleProvenance(req struct {
@@ -521,6 +590,8 @@ func (a *App) validateModuleProvenance(req struct {
 	TestFiles          []string       `json:"testFiles"`
 	Manifest           map[string]any `json:"manifest"`
 	Provenance         map[string]any `json:"provenance"`
+	RegistryDecision   string         `json:"registryDecision"`
+	SupersedesModuleID string         `json:"supersedesModuleId"`
 }) error {
 	var candidateStatus string
 	err := a.store.DB.QueryRow(`SELECT status FROM candidates WHERE id=? AND session_id=? AND repository_id=?`, req.SourceCandidateID, req.SourceSessionID, req.SourceRepositoryID).Scan(&candidateStatus)
@@ -794,6 +865,211 @@ func overlapCount(a, b []string) int {
 func canonicalJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func (a *App) handleCreateSpecEnrichment(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SpecPath string `json:"specPath"`
+	}
+	if err := decodeStrict(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	specPath, err := filepath.Abs(req.SpecPath)
+	if err != nil || len(a.cfg.AllowedRoots) == 0 || !paths.InAllowedRoots(specPath, a.cfg.AllowedRoots) {
+		writeErr(w, APIError{Status: 400, Code: "path.invalid", Message: "spec file is outside allowed roots"})
+		return
+	}
+	info, err := os.Stat(specPath)
+	if err != nil || info.IsDir() {
+		writeErr(w, APIError{Status: 400, Code: "path.invalid", Message: "spec path must be a readable file"})
+		return
+	}
+	id, ts := newID("enrich"), now()
+	ext := filepath.Ext(specPath)
+	outputPath := strings.TrimSuffix(specPath, ext) + ".enriched" + ext
+	if ext == "" {
+		outputPath = specPath + ".enriched.md"
+	}
+	root := filepath.Join(a.cfg.DataDir, "spec-enrichments", id)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		writeErr(w, err)
+		return
+	}
+	_, err = a.store.DB.Exec(`INSERT INTO spec_enrichments(id,spec_path,output_path,artifact_root,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, id, specPath, outputPath, root, "created", ts, ts)
+	item, getErr := getSingle(a.store.DB, `SELECT * FROM spec_enrichments WHERE id=?`, id)
+	if err != nil {
+		getErr = err
+	}
+	one(w, getErr, 201, item)
+}
+
+func (a *App) handleGetSpecEnrichment(w http.ResponseWriter, r *http.Request) {
+	item, err := getSingle(a.store.DB, `SELECT * FROM spec_enrichments WHERE id=?`, r.PathValue("enrichmentId"))
+	one(w, err, 200, item)
+}
+
+func (a *App) handleSpecEnrichmentJob(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider"`
+	}
+	if err := decodeStrict(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, err := getSingle(a.store.DB, `SELECT id FROM spec_enrichments WHERE id=?`, r.PathValue("enrichmentId")); err != nil {
+		writeErr(w, APIError{Status: 404, Code: "resource.not_found", Message: "spec enrichment not found"})
+		return
+	}
+	code, job, err := a.QueueJob(r.Context(), "spec_enrichment", "spec_enrichment", r.PathValue("enrichmentId"), req.Provider)
+	if err == nil && code == 202 {
+		_, _ = a.store.DB.Exec(`UPDATE spec_enrichments SET status='queued', updated_at=? WHERE id=?`, now(), r.PathValue("enrichmentId"))
+	}
+	one(w, err, code, job)
+}
+
+func (a *App) handleCreateComposition(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name              string         `json:"name"`
+		Intent            string         `json:"intent"`
+		SelectedModuleIDs []string       `json:"selectedModuleIds"`
+		FlowLayout        map[string]any `json:"flowLayout"`
+	}
+	if err := decodeStrict(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if strings.TrimSpace(req.Intent) == "" || len(req.SelectedModuleIDs) == 0 {
+		writeErr(w, APIError{Status: 400, Code: "request.missing_field", Message: "intent and selected modules are required"})
+		return
+	}
+	if req.Name == "" {
+		req.Name = "Freeform Composition"
+	}
+	for _, id := range req.SelectedModuleIDs {
+		if _, err := getSingle(a.store.DB, `SELECT id FROM modules WHERE id=? AND available_in_workbench=1`, id); err != nil {
+			writeErr(w, APIError{Status: 404, Code: "resource.not_found", Message: "selected module not found"})
+			return
+		}
+	}
+	id, ts := newID("comp"), now()
+	root := filepath.Join(a.cfg.DataDir, "compositions", id)
+	if req.FlowLayout == nil {
+		req.FlowLayout = map[string]any{"nodes": []any{}, "edges": []any{}}
+	}
+	flowPath, err := writeDoc(filepath.Join(root, "flow-layout.json"), req.FlowLayout)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	_, err = a.store.DB.Exec(`INSERT INTO compositions(id,name,intent,selected_modules_json,flow_layout_path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, id, req.Name, req.Intent, jsonText(req.SelectedModuleIDs), flowPath, "draft", ts, ts)
+	item, getErr := getSingle(a.store.DB, `SELECT * FROM compositions WHERE id=?`, id)
+	if err != nil {
+		getErr = err
+	}
+	one(w, getErr, 201, item)
+}
+
+func (a *App) handleGetComposition(w http.ResponseWriter, r *http.Request) {
+	item, err := getSingle(a.store.DB, `SELECT * FROM compositions WHERE id=?`, r.PathValue("compositionId"))
+	one(w, err, 200, item)
+}
+
+func (a *App) handlePatchCompositionLayout(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FlowLayout map[string]any `json:"flowLayout"`
+	}
+	if err := decodeStrict(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := r.PathValue("compositionId")
+	if len(req.FlowLayout) == 0 {
+		writeErr(w, APIError{Status: 400, Code: "request.missing_field", Message: "flowLayout is required"})
+		return
+	}
+	root := filepath.Join(a.cfg.DataDir, "compositions", id)
+	path, err := writeDoc(filepath.Join(root, "flow-layout.json"), req.FlowLayout)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	_, err = a.store.DB.Exec(`UPDATE compositions SET flow_layout_path=?, updated_at=? WHERE id=?`, path, now(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	item, err := getSingle(a.store.DB, `SELECT * FROM compositions WHERE id=?`, id)
+	one(w, err, 200, item)
+}
+
+func (a *App) handleCompositionClarificationJob(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider"`
+	}
+	if err := decodeStrict(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, err := getSingle(a.store.DB, `SELECT id FROM compositions WHERE id=?`, r.PathValue("compositionId")); err != nil {
+		writeErr(w, APIError{Status: 404, Code: "resource.not_found", Message: "composition not found"})
+		return
+	}
+	code, job, err := a.QueueJob(r.Context(), "composition_clarifier", "composition", r.PathValue("compositionId"), req.Provider)
+	if err == nil && code == 202 {
+		_, _ = a.store.DB.Exec(`UPDATE compositions SET status='clarifying', updated_at=? WHERE id=?`, now(), r.PathValue("compositionId"))
+	}
+	one(w, err, code, job)
+}
+
+func (a *App) handleCompositionAnswers(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Answers map[string]string `json:"answers"`
+	}
+	if err := decodeStrict(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if len(req.Answers) == 0 {
+		writeErr(w, APIError{Status: 400, Code: "request.missing_field", Message: "answers are required"})
+		return
+	}
+	status := "ready_to_compile"
+	_, err := a.store.DB.Exec(`UPDATE compositions SET answers_json=?, status=?, updated_at=? WHERE id=?`, jsonText(req.Answers), status, now(), r.PathValue("compositionId"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	item, err := getSingle(a.store.DB, `SELECT * FROM compositions WHERE id=?`, r.PathValue("compositionId"))
+	one(w, err, 200, item)
+}
+
+func (a *App) handleCompositionCompileJob(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider"`
+	}
+	if err := decodeStrict(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var status, answersJSON string
+	if err := a.store.DB.QueryRow(`SELECT status,answers_json FROM compositions WHERE id=?`, r.PathValue("compositionId")).Scan(&status, &answersJSON); err != nil {
+		writeErr(w, APIError{Status: 404, Code: "resource.not_found", Message: "composition not found"})
+		return
+	}
+	if status != "ready_to_compile" && status != "compiled" {
+		writeErr(w, APIError{Status: 409, Code: "blueprint.invalid", Message: "composition clarifications must be answered before compile"})
+		return
+	}
+	if strings.TrimSpace(answersJSON) == "" || answersJSON == "{}" {
+		writeErr(w, APIError{Status: 409, Code: "blueprint.invalid", Message: "composition has no clarification answers"})
+		return
+	}
+	code, job, err := a.QueueJob(r.Context(), "blueprint_compiler", "composition", r.PathValue("compositionId"), req.Provider)
+	if err == nil && code == 202 {
+		_, _ = a.store.DB.Exec(`UPDATE compositions SET status='compiling', updated_at=? WHERE id=?`, now(), r.PathValue("compositionId"))
+	}
+	one(w, err, code, job)
 }
 
 func (a *App) handleValidateWorkbenchEdge(w http.ResponseWriter, r *http.Request) {
@@ -1281,9 +1557,16 @@ func (a *App) importCandidateReport(ctx context.Context, job Job) error {
 			if err := tx.QueryRow(`SELECT repository_id FROM repo_sessions WHERE id=?`, job.SubjectID).Scan(&repoID); err != nil {
 				return err
 			}
+			comparedID, decision, score := a.compareCandidateToRegistryTx(tx, c.ProposedName, c.SourcePaths, c.Dependencies, c.TestsFound, c.Ports, c.WorkbenchNode)
+			status := "proposed"
+			userReason := any(nil)
+			if decision == "drop" {
+				status = "rejected"
+				userReason = "Dropped by registry comparison because an existing module scored higher for the same architecture surface."
+			}
 			id := fmt.Sprintf("%s.cand.%03d", job.SubjectID, i+1)
 			ts := now()
-			_, err := tx.Exec(`INSERT OR REPLACE INTO candidates(id,session_id,repository_id,proposed_name,description,module_kind,target_language,confidence,extraction_risk,status,source_paths_json,reusable_rationale,coupling_notes,dependencies_json,side_effects_json,tests_found_json,missing_tests_json,ports_json,workbench_node_json,report_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, job.SubjectID, repoID, c.ProposedName, c.Description, c.ModuleKind, c.TargetLanguage, c.Confidence, c.ExtractionRisk, "proposed", jsonText(c.SourcePaths), c.ReusableRationale, c.CouplingNotes, jsonText(c.Dependencies), jsonText(c.SideEffects), jsonText(c.TestsFound), jsonText(c.MissingTests), jsonText(c.Ports), jsonText(c.WorkbenchNode), path, ts, ts)
+			_, err := tx.Exec(`INSERT OR REPLACE INTO candidates(id,session_id,repository_id,proposed_name,description,module_kind,target_language,confidence,extraction_risk,status,source_paths_json,reusable_rationale,coupling_notes,dependencies_json,side_effects_json,tests_found_json,missing_tests_json,ports_json,compared_module_id,registry_decision,architecture_score_json,workbench_node_json,report_path,user_reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, job.SubjectID, repoID, c.ProposedName, c.Description, c.ModuleKind, c.TargetLanguage, c.Confidence, c.ExtractionRisk, status, jsonText(c.SourcePaths), c.ReusableRationale, c.CouplingNotes, jsonText(c.Dependencies), jsonText(c.SideEffects), jsonText(c.TestsFound), jsonText(c.MissingTests), jsonText(c.Ports), nullable(comparedID), decision, jsonText(score), jsonText(c.WorkbenchNode), path, userReason, ts, ts)
 			if err != nil {
 				return err
 			}
@@ -1291,4 +1574,87 @@ func (a *App) importCandidateReport(ctx context.Context, job Job) error {
 		_, err := tx.Exec(`UPDATE repo_sessions SET phase='awaiting_approval', candidate_report_path=?, updated_at=? WHERE id=?`, path, now(), job.SubjectID)
 		return err
 	})
+}
+
+func (a *App) compareCandidateToRegistryTx(tx *sql.Tx, name string, sourcePaths, dependencies, testsFound []string, ports map[string]any, workbenchNode map[string]any) (string, string, map[string]any) {
+	testStatus := "not_run"
+	if len(testsFound) > 0 {
+		testStatus = "passing"
+	}
+	candidate := moduleComparisonData{
+		ID:           "candidate:" + name,
+		Capabilities: candidateCapabilities(name, workbenchNode),
+		Ports:        ports,
+		Config:       map[string]any{},
+		SourcePaths:  sourcePaths,
+		Dependencies: dependencies,
+		TestStatus:   testStatus,
+	}
+	rows, err := tx.Query(`SELECT id FROM modules WHERE superseded_by_module_id IS NULL`)
+	if err != nil {
+		return "", "add", map[string]any{"candidateScore": moduleQualityScore(candidate), "reason": "registry_unavailable"}
+	}
+	defer rows.Close()
+	best := registryComparison{ModuleID: candidate.ID, Classification: "new_module"}
+	bestOther := moduleComparisonData{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		other, err := a.moduleComparisonData(id)
+		if err != nil {
+			continue
+		}
+		cmp := classifyRegistryModules(candidate, other)
+		if cmp.rank() > best.rank() || (cmp.rank() == best.rank() && cmp.CapabilityOverlap > best.CapabilityOverlap) {
+			best = cmp
+			bestOther = other
+		}
+	}
+	decision := "add"
+	if best.ComparedModuleID != "" {
+		candidateScore := moduleQualityScore(candidate)
+		otherScore := moduleQualityScore(bestOther)
+		switch best.Classification {
+		case "reject_duplicate", "duplicate":
+			if candidateScore <= otherScore {
+				decision = "drop"
+			} else {
+				decision = "replace"
+			}
+		case "variant", "adapter_needed":
+			decision = "keep-as-variant"
+		case "merge_candidate":
+			if candidateScore > otherScore {
+				decision = "replace"
+			} else {
+				decision = "keep-as-variant"
+			}
+		}
+	}
+	score := map[string]any{
+		"classification":      best.Classification,
+		"capabilityOverlap":   best.CapabilityOverlap,
+		"sourcePathOverlap":   best.SourcePathOverlap,
+		"portsIdentical":      best.PortsIdentical,
+		"configIdentical":     best.ConfigIdentical,
+		"dependenciesOverlap": best.DependenciesOverlap,
+		"candidateScore":      moduleQualityScore(candidate),
+		"registryScore":       moduleQualityScore(bestOther),
+	}
+	return best.ComparedModuleID, decision, score
+}
+
+func candidateCapabilities(name string, node map[string]any) []string {
+	out := []string{}
+	if trimmed := strings.TrimSpace(name); trimmed != "" {
+		out = append(out, trimmed)
+	}
+	for k, v := range node {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, k+":"+s)
+		}
+	}
+	return out
 }
