@@ -167,6 +167,23 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	if !strings.Contains(promptText, "Output contract") {
 		t.Fatalf("extraction prompt does not include output contract:\n%s", promptText)
 	}
+	if !strings.Contains(promptText, "target language: go") {
+		t.Fatalf("extraction prompt does not include candidate target language:\n%s", promptText)
+	}
+	if !strings.Contains(promptText, "For non-Go source candidates") {
+		t.Fatalf("extraction prompt does not require non-Go conversion:\n%s", promptText)
+	}
+	readRoot := filepath.Join(app.cfg.DataDir, "jobs", extractionJob["id"].(string), "workspace", "read")
+	if _, err := os.Stat(filepath.Join(readRoot, "repo", "README.md")); err != nil {
+		t.Fatalf("extraction read root missing source checkout: %v", err)
+	}
+	candidateMetadata, err := os.ReadFile(filepath.Join(readRoot, "candidates.json"))
+	if err != nil {
+		t.Fatalf("extraction read root missing candidate metadata: %v", err)
+	}
+	if !strings.Contains(string(candidateMetadata), candidate["id"].(string)) || !strings.Contains(string(candidateMetadata), `"targetLanguage": "go"`) {
+		t.Fatalf("candidate metadata missing approved candidate target language: %s", string(candidateMetadata))
+	}
 	code, missingPlan := doJSON(t, app, http.MethodPost, "/api/extraction-plans/missing/jobs", map[string]any{"provider": "fake"})
 	if code != 404 || missingPlan["error"].(map[string]any)["code"] != "resource.not_found" {
 		t.Fatalf("missing extraction plan job status=%d body=%v", code, missingPlan)

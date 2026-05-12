@@ -46,6 +46,13 @@ type ProviderStart struct {
 	OutputPath      string
 }
 
+type promptCandidate struct {
+	ID             string
+	ProposedName   string
+	TargetLanguage string
+	SourcePaths    []string
+}
+
 type FakeProvider struct{}
 
 func (FakeProvider) Start(ctx context.Context, job Job) (ProviderStart, error) {
@@ -332,7 +339,7 @@ func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, s
 	case role == "repo_analysis", role == "candidate_scan":
 		data["OutputContract"] = "Emit candidate-report.json with the CandidateReport schema: {candidates: [{proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, sourcePaths, reusableRationale, couplingNotes, dependencies, sideEffects, testsFound, missingTests, ports: {inputs, outputs}, workbenchNode}]}."
 	case role == "extraction", role == "module_extraction":
-		data["OutputContract"] = "For each approved candidate, emit module source code, tests, manifest.json, config.schema.json, docs, and provenance metadata under the OutputRoot."
+		data["OutputContract"] = "For each approved candidate, read its sourcePaths from the repo checkout, convert or rewrite the module into the candidate targetLanguage (default go), and emit production source files, unit tests, manifest.json, config.schema.json, docs, and provenance metadata under the OutputRoot."
 		var approvedJSON, rejectedJSON string
 		if err := a.store.DB.QueryRowContext(ctx, `SELECT approved_candidate_ids_json, rejected_candidate_ids_json FROM extraction_plans WHERE id=?`, subjectID).Scan(&approvedJSON, &rejectedJSON); err == nil {
 			var approved, rejected []string
@@ -340,6 +347,7 @@ func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, s
 			_ = json.Unmarshal([]byte(rejectedJSON), &rejected)
 			data["ApprovedCandidateIDs"] = approved
 			data["RejectedCandidateIDs"] = rejected
+			data["ApprovedCandidates"] = a.promptCandidates(ctx, approved)
 		}
 	case role == "spec_enrichment" && subjectType == "spec_enrichment":
 		data["OutputContract"] = "Review the input spec and registry module summaries. Emit selected-modules.json and enriched.md containing a ## Registry References section with module name/version, why it applies, ports/capabilities, expected integration point, and replacement or variant notes."
@@ -368,11 +376,7 @@ func (a *App) materializeReadRoots(ctx context.Context, role, subjectType, subje
 		}
 		return copyDir(checkout, filepath.Join(readRoot, "repo"))
 	case (role == "extraction" || role == "module_extraction" || role == "registry_update") && subjectType == "extraction_plan":
-		var planPath string
-		if err := a.store.DB.QueryRowContext(ctx, `SELECT plan_path FROM extraction_plans WHERE id=?`, subjectID).Scan(&planPath); err != nil {
-			return err
-		}
-		return copyFile(planPath, filepath.Join(readRoot, "extraction-plan.json"), 0o644)
+		return a.materializeExtractionReadRoot(ctx, subjectID, readRoot)
 	case role == "spec_enrichment" && subjectType == "spec_enrichment":
 		var specPath string
 		if err := a.store.DB.QueryRowContext(ctx, `SELECT spec_path FROM spec_enrichments WHERE id=?`, subjectID).Scan(&specPath); err != nil {
@@ -400,6 +404,59 @@ func (a *App) materializeReadRoots(ctx context.Context, role, subjectType, subje
 	default:
 		return nil
 	}
+}
+
+func (a *App) materializeExtractionReadRoot(ctx context.Context, planID, readRoot string) error {
+	var planPath, sessionID, approvedJSON, rejectedJSON string
+	if err := a.store.DB.QueryRowContext(ctx, `SELECT plan_path,session_id,approved_candidate_ids_json,rejected_candidate_ids_json FROM extraction_plans WHERE id=?`, planID).Scan(&planPath, &sessionID, &approvedJSON, &rejectedJSON); err != nil {
+		return err
+	}
+	if err := copyFile(planPath, filepath.Join(readRoot, "extraction-plan.json"), 0o644); err != nil {
+		return err
+	}
+	var checkout string
+	if err := a.store.DB.QueryRowContext(ctx, `SELECT checkout_path FROM repo_sessions WHERE id=?`, sessionID).Scan(&checkout); err != nil {
+		return err
+	}
+	if err := copyDir(checkout, filepath.Join(readRoot, "repo")); err != nil {
+		return err
+	}
+	var approvedIDs, rejectedIDs []string
+	_ = json.Unmarshal([]byte(approvedJSON), &approvedIDs)
+	_ = json.Unmarshal([]byte(rejectedJSON), &rejectedIDs)
+	candidates := map[string]any{
+		"approved": a.candidateRecords(approvedIDs),
+		"rejected": a.candidateRecords(rejectedIDs),
+	}
+	return writeJSONFile(filepath.Join(readRoot, "candidates.json"), candidates)
+}
+
+func (a *App) candidateRecords(ids []string) []map[string]any {
+	out := []map[string]any{}
+	for _, id := range ids {
+		item, err := getSingle(a.store.DB, `SELECT * FROM candidates WHERE id=?`, id)
+		if err == nil {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func (a *App) promptCandidates(ctx context.Context, ids []string) []promptCandidate {
+	out := []promptCandidate{}
+	for _, id := range ids {
+		var name, targetLanguage, sourcePathsJSON string
+		if err := a.store.DB.QueryRowContext(ctx, `SELECT proposed_name,target_language,source_paths_json FROM candidates WHERE id=?`, id).Scan(&name, &targetLanguage, &sourcePathsJSON); err != nil {
+			continue
+		}
+		var sourcePaths []string
+		_ = json.Unmarshal([]byte(sourcePathsJSON), &sourcePaths)
+		if targetLanguage == "" {
+			targetLanguage = "go"
+		}
+		out = append(out, promptCandidate{ID: id, ProposedName: name, TargetLanguage: targetLanguage, SourcePaths: sourcePaths})
+	}
+	return out
 }
 
 func (a *App) writeRegistrySnapshot(path string) error {

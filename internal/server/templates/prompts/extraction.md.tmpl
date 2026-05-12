@@ -3,11 +3,19 @@
 Job: {{.JobID}}
 Subject: {{.SubjectType}} {{.SubjectID}}
 
-Use the extraction plan at {{.WorkspaceReadRoot}}/extraction-plan.json as the source of truth.
+Use these read-only inputs as the source of truth:
+
+- Extraction plan: {{.WorkspaceReadRoot}}/extraction-plan.json
+- Candidate metadata: {{.WorkspaceReadRoot}}/candidates.json
+- Source checkout: {{.WorkspaceReadRoot}}/repo
 
 ## Approved candidates — extract these
-{{range .ApprovedCandidateIDs}}
-- {{.}}
+{{range .ApprovedCandidates}}
+- {{.ID}} — {{.ProposedName}} — target language: {{.TargetLanguage}}
+  Source paths:
+  {{range .SourcePaths}}
+  - {{.}}
+  {{end}}
 {{end}}
 {{if .RejectedCandidateIDs}}
 ## Rejected candidates — do NOT operate on these
@@ -20,6 +28,8 @@ Use the extraction plan at {{.WorkspaceReadRoot}}/extraction-plan.json as the so
 {{.OutputContract}}
 
 Write extracted source, tests, manifest, config schema, docs, provenance, and status artifacts under {{.OutputRoot}}.
+
+For non-Go source candidates, rewrite the reusable behavior into idiomatic Go unless the candidate metadata explicitly names a different target language. Tests are mandatory: include target-language unit tests for the extracted public behavior and error paths. Do not register or preserve raw source-language code as the module implementation unless it is only documentation or provenance.
 
 ## Safety rules
 
