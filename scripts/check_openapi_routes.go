@@ -199,6 +199,7 @@ func expectedSuccessResponse(route string) string {
 		"GET /api/repositories":                                     "#/components/responses/RepositoryList",
 		"POST /api/sessions":                                        "#/components/responses/Session",
 		"GET /api/sessions":                                         "#/components/responses/SessionList",
+		"DELETE /api/sessions":                                      "#/components/responses/SessionCleanupResult",
 		"GET /api/sessions/{sessionId}":                             "#/components/responses/Session",
 		"GET /api/sessions/{sessionId}/files":                       "#/components/responses/SourceFile",
 		"POST /api/sessions/{sessionId}/intent":                     "#/components/responses/Session",
@@ -244,7 +245,8 @@ func expectedSuccessResponse(route string) string {
 
 func expectedQueryParams(route string) []string {
 	expected := map[string][]string{
-		"GET /api/candidates": {"sessionId", "repositoryId", "status", "extractionRisk", "confidence", "capability"},
+		"DELETE /api/sessions": {"keepSessionId"},
+		"GET /api/candidates":  {"sessionId", "repositoryId", "status", "extractionRisk", "confidence", "capability"},
 	}
 	return expected[route]
 }
@@ -364,6 +366,8 @@ func paramName(component string) string {
 		return "enrichmentId"
 	case "CompositionId":
 		return "compositionId"
+	case "KeepSessionId":
+		return "keepSessionId"
 	case "SessionFilter":
 		return "sessionId"
 	case "RepositoryFilter":

@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **code_workbench**. Use GitNexus to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **code_workbench** (99055 symbols, 199719 relationships, 300 execution flows). Use GitNexus to understand code, assess impact, and navigate safely.
 
 ## ⚠️ CRITICAL: Use the CLI, not MCP tools
 
@@ -9,7 +9,7 @@ This project is indexed by GitNexus as **code_workbench**. Use GitNexus to under
 
 - Every command below is a `Bash` tool invocation. All other GitNexus guidance in this document refers to CLI subcommands, not MCP calls.
 - The repository is indexed as `code_workbench`. Pass `-r code_workbench` when you want to be explicit, or rely on the current working directory.
-- If `npx gitnexus status` reports the index is stale, run `npx gitnexus analyze` before any other GitNexus command.
+- If `npx gitnexus status` reports the index is stale, run `npx gitnexus analyze --embeddings` before any other GitNexus command.
 - Two operations have no CLI equivalent: pre-commit change detection (use `git diff --name-only --cached` / `git status --short`) and symbol renames (use `npx gitnexus context <name>` + `npx gitnexus impact <name>` first, then apply edits via the Edit tool). Do NOT fall back to the MCP tools for these.
 
 ## Always Do
@@ -29,9 +29,9 @@ This project is indexed by GitNexus as **code_workbench**. Use GitNexus to under
 
 ## When Refactoring
 
-- **Renaming**: MUST run `npx gitnexus context <old>` and `npx gitnexus impact <old>` first to see every caller. Apply the rename via the Edit tool with `replace_all: true` on each affected file, then re-run `npx gitnexus analyze` to rebuild the graph and re-run `npx gitnexus impact <new>` to confirm no callers were missed. Do NOT use the `mcp__gitnexus__rename` MCP tool.
+- **Renaming**: MUST run `npx gitnexus context <old>` and `npx gitnexus impact <old>` first to see every caller. Apply the rename via the Edit tool with `replace_all: true` on each affected file, then re-run `npx gitnexus analyze --embeddings` to rebuild the graph and re-run `npx gitnexus impact <new>` to confirm no callers were missed. Do NOT use the `mcp__gitnexus__rename` MCP tool.
 - **Extracting/Splitting**: MUST run `npx gitnexus context <target>` to see all incoming/outgoing refs, then `npx gitnexus impact <target> --direction upstream` to find all external callers before moving code.
-- After any refactor: `git diff --stat` to verify only expected files changed; re-run `npx gitnexus analyze` and `npx gitnexus impact` on the new symbol names to confirm the call graph is intact.
+- After any refactor: `git diff --stat` to verify only expected files changed; re-run `npx gitnexus analyze --embeddings` and `npx gitnexus impact` on the new symbol names to confirm the call graph is intact.
 
 ## Never Do
 
@@ -54,7 +54,7 @@ All commands are invoked via the `Bash` tool. Add `-r code_workbench` if ambigui
 | Custom graph queries | `npx gitnexus cypher "MATCH (f:Function)-[:CALLS]->(g) WHERE f.name = 'foo' RETURN g.name"` |
 | Index status | `npx gitnexus status` |
 | List indexed repos | `npx gitnexus list` |
-| Re-index (after commits) | `npx gitnexus analyze` (add `--embeddings` to preserve embeddings) |
+| Re-index (after commits) | `npx gitnexus analyze --embeddings` |
 | Generate wiki | `npx gitnexus wiki` |
 | Pre-commit scope check | `git status --short && git diff --stat --cached` (no GitNexus CLI equivalent) |
 | Pre-rename caller enumeration | `npx gitnexus context <name> && npx gitnexus impact <name>` (no GitNexus CLI rename equivalent) |
@@ -88,19 +88,15 @@ Before completing any code modification task, verify:
 
 ## Keeping the Index Fresh
 
-After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it:
-
-```bash
-npx gitnexus analyze
-```
-
-If the index previously included embeddings, preserve them by adding `--embeddings`:
+After committing code changes, the GitNexus index becomes stale. Re-run analyze with embeddings enabled to update it:
 
 ```bash
 npx gitnexus analyze --embeddings
 ```
 
-To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
+To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Always use `--embeddings`; running analyze without it can delete previously generated embeddings.**
+
+> Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
 
 ## CLI
 

@@ -70,17 +70,20 @@ func (a *App) handleCreateRepository(w http.ResponseWriter, r *http.Request) {
 	checkout := filepath.Join(sourceRoot, slug)
 	if !req.Rescan {
 		checkout = uniqueSourcePath(sourceRoot, slug)
-	} else {
-		_ = os.RemoveAll(checkout)
+	}
+	cleanupFailedCheckout := func() {
+		if !req.Rescan {
+			_ = os.RemoveAll(checkout)
+		}
 	}
 	if req.SourceType == "local_path" {
 		if err := createLocalCheckout(r.Context(), req.SourceURI, checkout); err != nil {
-			_ = os.RemoveAll(checkout)
+			cleanupFailedCheckout()
 			writeErr(w, APIError{Status: 502, Code: "repository.clone_failed", Message: err.Error()})
 			return
 		}
 	} else if err := runGitClone(r.Context(), req.SourceURI, checkout); err != nil {
-		_ = os.RemoveAll(checkout)
+		cleanupFailedCheckout()
 		writeErr(w, APIError{Status: 502, Code: "repository.clone_failed", Message: err.Error()})
 		return
 	}
@@ -147,6 +150,113 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	a.queryRows(w, `SELECT s.*, (SELECT role FROM agent_jobs j WHERE j.subject_type='session' AND j.subject_id=s.id AND j.status IN ('queued','running') ORDER BY created_at DESC LIMIT 1) AS active_job_role FROM repo_sessions s ORDER BY created_at DESC`)
+}
+
+func (a *App) handleClearSessions(w http.ResponseWriter, r *http.Request) {
+	keepID := strings.TrimSpace(r.URL.Query().Get("keepSessionId"))
+	var total int
+	if err := a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM repo_sessions`).Scan(&total); err != nil {
+		writeErr(w, err)
+		return
+	}
+	rows, err := a.store.DB.QueryContext(r.Context(), `
+		SELECT s.id, s.scratch_path
+		FROM repo_sessions s
+		WHERE (? = '' OR s.id <> ?)
+		  AND NOT EXISTS (SELECT 1 FROM modules m WHERE m.source_session_id=s.id)
+		  AND NOT EXISTS (
+		    SELECT 1 FROM agent_jobs j
+		    WHERE j.subject_type='session' AND j.subject_id=s.id AND j.status IN ('queued','running')
+		  )
+		ORDER BY s.created_at ASC`, keepID, keepID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	type cleanupSession struct {
+		id          string
+		scratchPath string
+	}
+	candidates := []cleanupSession{}
+	for rows.Next() {
+		var item cleanupSession
+		if err := rows.Scan(&item.id, &item.scratchPath); err != nil {
+			rows.Close()
+			writeErr(w, err)
+			return
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Close(); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if len(candidates) == 0 {
+		writeJSON(w, 200, map[string]any{"deleted": 0, "retained": total})
+		return
+	}
+	if err := storage.WithTx(r.Context(), a.store.DB, func(tx *sql.Tx) error {
+		for _, item := range candidates {
+			candidateRows, err := tx.QueryContext(r.Context(), `SELECT id FROM candidates WHERE session_id=?`, item.id)
+			if err != nil {
+				return err
+			}
+			candidateIDs := []string{}
+			for candidateRows.Next() {
+				var id string
+				if err := candidateRows.Scan(&id); err != nil {
+					candidateRows.Close()
+					return err
+				}
+				candidateIDs = append(candidateIDs, id)
+			}
+			if err := candidateRows.Close(); err != nil {
+				return err
+			}
+			planRows, err := tx.QueryContext(r.Context(), `SELECT id FROM extraction_plans WHERE session_id=?`, item.id)
+			if err != nil {
+				return err
+			}
+			planIDs := []string{}
+			for planRows.Next() {
+				var id string
+				if err := planRows.Scan(&id); err != nil {
+					planRows.Close()
+					return err
+				}
+				planIDs = append(planIDs, id)
+			}
+			if err := planRows.Close(); err != nil {
+				return err
+			}
+			for _, candidateID := range candidateIDs {
+				if _, err := tx.ExecContext(r.Context(), `DELETE FROM agent_jobs WHERE subject_type='candidate' AND subject_id=?`, candidateID); err != nil {
+					return err
+				}
+			}
+			for _, planID := range planIDs {
+				if _, err := tx.ExecContext(r.Context(), `DELETE FROM agent_jobs WHERE subject_type='extraction_plan' AND subject_id=?`, planID); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.ExecContext(r.Context(), `DELETE FROM agent_jobs WHERE subject_type='session' AND subject_id=?`, item.id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(r.Context(), `DELETE FROM repo_sessions WHERE id=?`, item.id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		writeErr(w, err)
+		return
+	}
+	for _, item := range candidates {
+		if item.scratchPath != "" {
+			_ = os.RemoveAll(filepath.Dir(item.scratchPath))
+		}
+	}
+	writeJSON(w, 200, map[string]any{"deleted": len(candidates), "retained": total - len(candidates)})
 }
 
 func (a *App) handleGetSession(w http.ResponseWriter, r *http.Request) {

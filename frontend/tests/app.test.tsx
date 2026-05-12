@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { App } from '../src/app/App';
 
@@ -53,6 +53,53 @@ it('shows registered sources so duplicates can be reused', async () => {
   expect(await screen.findByText('existing-repo')).toBeInTheDocument();
   expect(screen.getByText('.sources/existing-repo')).toBeInTheDocument();
   expect(screen.getByText('Use for extraction')).toBeInTheDocument();
+});
+
+it('uses the selected registered source for rescan guidance', async () => {
+  const repo = { id: 'repo_1', name: 'existing-repo', sourceType: 'local_path', sourceUri: '/allowed/existing-repo', sourceCheckoutPath: '.sources/existing-repo', createdAt: 'now', updatedAt: 'now' };
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+    const path = String(url);
+    if (path.includes('/api/repositories') && init?.method === 'POST') {
+      expect(JSON.parse(String(init.body))).toMatchObject({ sourceUri: repo.sourceUri, rescan: true });
+      return Promise.resolve(new Response(JSON.stringify(repo), { status: 201, headers: { 'content-type': 'application/json' } }));
+    }
+    if (path.includes('/api/sessions') && init?.method === 'POST') {
+      return Promise.resolve(new Response(JSON.stringify({ id: 'sess_1', repositoryId: repo.id, repoName: repo.name, phase: 'awaiting_user_intent', createdAt: 'now', updatedAt: 'now' }), { status: 201, headers: { 'content-type': 'application/json' } }));
+    }
+    const body = path.includes('/api/repositories') ? { items: [repo] } : { items: [] };
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByText('Use for extraction'));
+  expect(await screen.findByText('Rescan existing-repo to refresh .sources, then describe what reusable functionality to extract.')).toBeInTheDocument();
+  fireEvent.click(screen.getByText('Rescan source'));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/repositories', expect.objectContaining({ method: 'POST' })));
+  expect(await screen.findByText('Describe what reusable functionality to extract, then start candidate scan for existing-repo.')).toBeInTheDocument();
+  expect(screen.getByText(/Enter an intent and press Start candidate scan to create an Agent Jobs entry/)).toBeInTheDocument();
+});
+
+it('clears previous extraction sessions while keeping the selected session', async () => {
+  const current = { id: 'sess_1', repositoryId: 'repo_1', repoName: 'paperclip', phase: 'awaiting_user_intent', createdAt: 'now', updatedAt: 'now' };
+  const previous = { id: 'sess_old', repositoryId: 'repo_1', repoName: 'old-paperclip', phase: 'awaiting_user_intent', createdAt: 'then', updatedAt: 'then' };
+  let cleared = false;
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+    const path = String(url);
+    if (path.includes('/api/sessions') && init?.method === 'DELETE') {
+      expect(path).toBe('/api/sessions?keepSessionId=sess_1');
+      cleared = true;
+      return Promise.resolve(new Response(JSON.stringify({ deleted: 1, retained: 1 }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    }
+    if (path.includes('/api/sessions')) {
+      return Promise.resolve(new Response(JSON.stringify({ items: cleared ? [current] : [current, previous] }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    }
+    return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  expect(await screen.findByText('old-paperclip')).toBeInTheDocument();
+  fireEvent.click(screen.getAllByText('Continue')[0]);
+  fireEvent.click(screen.getByText('Clear previous sessions'));
+  expect(await screen.findByText('Cleared 1 previous extraction session.')).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText('old-paperclip')).not.toBeInTheDocument());
 });
 
 it('lets users place modules on a composition canvas before intent is entered', async () => {

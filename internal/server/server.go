@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"embed"
@@ -55,11 +56,13 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	logw, err := logging.NewJSONL(filepath.Join(cfg.DataDir, "documents", "ops.jsonl"), cfg.DebugLogs)
+	logPath := filepath.Join(cfg.DataDir, "server.log")
+	logw, err := logging.NewJSONL(logPath, cfg.DebugLogs)
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
+	logw.Event("server_log_opened", map[string]any{"path": logPath})
 	app := &App{cfg: cfg, store: store, log: logw, started: map[string]bool{}, logPos: map[string]int64{}}
 	app.providers = map[string]AgentProvider{
 		"claude_code_tmux": NewClaudeProvider(cfg.DataDir),
@@ -97,6 +100,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/repositories", a.handleListRepositories)
 	mux.HandleFunc("POST /api/sessions", a.handleCreateSession)
 	mux.HandleFunc("GET /api/sessions", a.handleListSessions)
+	mux.HandleFunc("DELETE /api/sessions", a.handleClearSessions)
 	mux.HandleFunc("GET /api/sessions/{sessionId}", a.handleGetSession)
 	mux.HandleFunc("GET /api/sessions/{sessionId}/files", a.handleSessionFile)
 	mux.HandleFunc("POST /api/sessions/{sessionId}/intent", a.handleSessionIntent)
@@ -145,7 +149,11 @@ func (a *App) withLogging(next http.Handler) http.Handler {
 		rw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rw, r)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			a.log.Event("api_request", map[string]any{"method": r.Method, "path": r.URL.Path, "status": rw.status, "duration_ms": time.Since(start).Milliseconds()})
+			attrs := map[string]any{"method": r.Method, "path": r.URL.Path, "status": rw.status, "duration_ms": time.Since(start).Milliseconds()}
+			if rw.status >= 400 && rw.body.Len() > 0 {
+				attrs["response"] = rw.body.String()
+			}
+			a.log.Event("api_request", attrs)
 		}
 	})
 }
@@ -153,11 +161,24 @@ func (a *App) withLogging(next http.Handler) http.Handler {
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+	body   bytes.Buffer
 }
 
 func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status >= 400 && w.body.Len() < 4096 {
+		remaining := 4096 - w.body.Len()
+		if len(b) > remaining {
+			_, _ = w.body.Write(b[:remaining])
+		} else {
+			_, _ = w.body.Write(b)
+		}
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 func (a *App) handleStatic(w http.ResponseWriter, r *http.Request) {
@@ -480,17 +501,42 @@ func publishCheckout(src, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(dest); err != nil {
+	backup, err := moveExistingAside(dest)
+	if err != nil {
 		return err
 	}
+	published := false
+	defer func() {
+		if published && backup != "" {
+			_ = os.RemoveAll(backup)
+		}
+	}()
 	if err := os.Rename(src, dest); err == nil {
+		published = true
 		return nil
 	}
 	if err := copyDir(src, dest); err != nil {
 		_ = os.RemoveAll(dest)
+		if backup != "" {
+			_ = os.Rename(backup, dest)
+		}
 		return err
 	}
+	published = true
 	return nil
+}
+
+func moveExistingAside(path string) (string, error) {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	backup := fmt.Sprintf("%s.replaced-%d", path, time.Now().UnixNano())
+	if err := os.Rename(path, backup); err != nil {
+		return "", err
+	}
+	return backup, nil
 }
 
 func copyDir(src, dest string) error {

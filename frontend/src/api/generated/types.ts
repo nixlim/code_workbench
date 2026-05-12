@@ -1,4 +1,4 @@
-// Generated from openapi.yaml sha256:5124ad52061acffd6aab19de1b30efe7fad36bd8359d7603c1f039b788c68944
+// Generated from openapi.yaml sha256:9949666789af137c059710ca8d8cc6d1ff83a0971ad6f9317b31f06dc93c5626
 export type APIRecord = Record<string, unknown>;
 
 export interface ListEnvelope<T = APIRecord> {
@@ -23,6 +23,11 @@ export interface Session {
   activeJobRole?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SessionCleanupResult {
+  deleted: number;
+  retained: number;
 }
 
 export interface Candidate {

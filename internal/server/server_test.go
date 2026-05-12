@@ -90,6 +90,20 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(checkoutPath, "README.md")); err != nil {
 		t.Fatalf("source checkout missing README: %v", err)
 	}
+	stalePath := filepath.Join(checkoutPath, "STALE.txt")
+	if err := os.WriteFile(stalePath, []byte("old checkout marker"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rescanned := doJSON(t, app, http.MethodPost, "/api/repositories", map[string]any{"sourceType": "local_path", "sourceUri": repoPath, "rescan": true})
+	if code != 201 {
+		t.Fatalf("rescan repo status=%d body=%v", code, rescanned)
+	}
+	if rescanned["sourceCheckoutPath"] != checkoutPath {
+		t.Fatalf("rescan changed canonical checkout path: %v vs %v", rescanned["sourceCheckoutPath"], checkoutPath)
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("rescan did not replace stale checkout file: %v", err)
+	}
 	code, session := doJSON(t, app, http.MethodPost, "/api/sessions", map[string]any{"repositoryId": repoID})
 	if code != 201 || session["phase"] != "awaiting_user_intent" {
 		t.Fatalf("create session status=%d body=%v", code, session)
@@ -218,6 +232,73 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	code, backslash := doJSON(t, app, http.MethodGet, "/api/sessions/"+sessionID+"/files?path=dir%5Cfile.go", nil)
 	if code != 400 || backslash["error"].(map[string]any)["code"] != "path.invalid" {
 		t.Fatalf("backslash status=%d body=%v", code, backslash)
+	}
+}
+
+func TestServerLogAppendsAPIErrorDetails(t *testing.T) {
+	app, _ := newTestApp(t)
+	code, body := doJSON(t, app, http.MethodPost, "/api/repositories", map[string]any{"sourceType": "local_path", "sourceUri": filepath.Join(t.TempDir(), "outside")})
+	if code != 400 || body["error"].(map[string]any)["code"] != "path.invalid" {
+		t.Fatalf("outside root status=%d body=%v", code, body)
+	}
+	logPath := filepath.Join(app.cfg.DataDir, "server.log")
+	first, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("server.log was not written: %v", err)
+	}
+	if !strings.Contains(string(first), `"kind":"api_request"`) || !strings.Contains(string(first), "path.invalid") {
+		t.Fatalf("server.log missing API error details: %s", string(first))
+	}
+	code, _ = doJSON(t, app, http.MethodGet, "/api/config", nil)
+	if code != 200 {
+		t.Fatalf("config status=%d", code)
+	}
+	second, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("server.log unreadable after second request: %v", err)
+	}
+	if len(second) <= len(first) {
+		t.Fatalf("server.log did not append; before=%d after=%d", len(first), len(second))
+	}
+}
+
+func TestClearPreviousSessionsKeepsSelectedSession(t *testing.T) {
+	app, repoPath := newTestApp(t)
+	_, repo := doJSON(t, app, http.MethodPost, "/api/repositories", map[string]any{"sourceType": "local_path", "sourceUri": repoPath})
+	_, oldSession := doJSON(t, app, http.MethodPost, "/api/sessions", map[string]any{"repositoryId": repo["id"]})
+	_, currentSession := doJSON(t, app, http.MethodPost, "/api/sessions", map[string]any{"repositoryId": repo["id"]})
+	oldID := oldSession["id"].(string)
+	currentID := currentSession["id"].(string)
+	oldRoot := filepath.Dir(oldSession["scratchPath"].(string))
+	if err := os.WriteFile(filepath.Join(oldRoot, "marker.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ts := now()
+	_, err := app.store.DB.Exec(`INSERT INTO agent_jobs(id,role,provider,status,subject_type,subject_id,prompt_path,timeout_seconds,created_at,started_at,finished_at) VALUES('old_session_job','repo_analysis','fake','succeeded','session',?,'prompt',1800,?,?,?)`, oldID, ts, ts, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, result := doJSON(t, app, http.MethodDelete, "/api/sessions?keepSessionId="+currentID, nil)
+	if code != 200 || result["deleted"] != float64(1) || result["retained"] != float64(1) {
+		t.Fatalf("clear sessions status=%d body=%v", code, result)
+	}
+	code, oldBody := doJSON(t, app, http.MethodGet, "/api/sessions/"+oldID, nil)
+	if code != 404 || oldBody["error"].(map[string]any)["code"] != "resource.not_found" {
+		t.Fatalf("old session still visible status=%d body=%v", code, oldBody)
+	}
+	code, currentBody := doJSON(t, app, http.MethodGet, "/api/sessions/"+currentID, nil)
+	if code != 200 || currentBody["id"] != currentID {
+		t.Fatalf("current session not retained status=%d body=%v", code, currentBody)
+	}
+	if _, err := os.Stat(oldRoot); !os.IsNotExist(err) {
+		t.Fatalf("old session files not removed: %v", err)
+	}
+	var jobCount int
+	if err := app.store.DB.QueryRow(`SELECT COUNT(*) FROM agent_jobs WHERE subject_id=?`, oldID).Scan(&jobCount); err != nil {
+		t.Fatal(err)
+	}
+	if jobCount != 0 {
+		t.Fatalf("old session jobs not removed: %d", jobCount)
 	}
 }
 

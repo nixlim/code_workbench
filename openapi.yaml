@@ -23,6 +23,7 @@ paths:
       requestBody: {$ref: '#/components/requestBodies/CreateSession'}
       responses: {'201': {$ref: '#/components/responses/Session'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}}
     get: {operationId: listSessions, tags: [sessions], responses: {'200': {$ref: '#/components/responses/SessionList'}}}
+    delete: {operationId: clearSessions, tags: [sessions], parameters: [{$ref: '#/components/parameters/KeepSessionId'}], responses: {'200': {$ref: '#/components/responses/SessionCleanupResult'}, '500': {$ref: '#/components/responses/Error'}}}
   /api/sessions/{sessionId}:
     parameters: [{$ref: '#/components/parameters/SessionId'}]
     get: {operationId: getSession, tags: [sessions], responses: {'200': {$ref: '#/components/responses/Session'}, '404': {$ref: '#/components/responses/Error'}}}
@@ -152,6 +153,7 @@ components:
     EnrichmentId: {name: enrichmentId, in: path, required: true, schema: {type: string}}
     CompositionId: {name: compositionId, in: path, required: true, schema: {type: string}}
     RelativePath: {name: path, in: query, required: true, schema: {type: string, not: {pattern: '(^/|\\.\\.|\\\\)'}}}
+    KeepSessionId: {name: keepSessionId, in: query, required: false, schema: {type: string}}
     SessionFilter: {name: sessionId, in: query, required: false, schema: {type: string}}
     RepositoryFilter: {name: repositoryId, in: query, required: false, schema: {type: string}}
     StatusFilter: {name: status, in: query, required: false, schema: {type: string}}
@@ -165,6 +167,7 @@ components:
     RepositoryList: {description: Repository list response, content: {application/json: {schema: {$ref: '#/components/schemas/RepositoryList'}}}}
     Session: {description: Session response, content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
     SessionList: {description: Session list response, content: {application/json: {schema: {$ref: '#/components/schemas/SessionList'}}}}
+    SessionCleanupResult: {description: Session cleanup response, content: {application/json: {schema: {$ref: '#/components/schemas/SessionCleanupResult'}}}}
     SourceFile: {description: Source file response, content: {application/json: {schema: {$ref: '#/components/schemas/SourceFile'}}}}
     Candidate: {description: Candidate response, content: {application/json: {schema: {$ref: '#/components/schemas/Candidate'}}}}
     CandidateList: {description: Candidate list response, content: {application/json: {schema: {$ref: '#/components/schemas/CandidateList'}}}}
@@ -228,6 +231,7 @@ components:
   schemas:
     RepositoryList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Repository'}}}}
     SessionList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Session'}}}}
+    SessionCleanupResult: {type: object, required: [deleted, retained], properties: {deleted: {type: integer}, retained: {type: integer}}}
     CandidateList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Candidate'}}}}
     ModuleList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Module'}}}}
     BlueprintList: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Blueprint'}}}}

@@ -1,8 +1,8 @@
 import ReactFlow, { Background, Controls, Handle, Position, addEdge, useEdgesState, useNodesState, type Connection, type NodeProps } from 'reactflow';
-import { Boxes, FileText, GitBranch, PlaySquare, Plus, RefreshCw, WandSparkles } from 'lucide-react';
+import { Boxes, FileText, GitBranch, PlaySquare, Plus, RefreshCw, Trash2, WandSparkles } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { AgentJob, Candidate, Composition, ModuleRecord, Repository, Session, SpecEnrichment } from '../api/generated/types';
+import type { AgentJob, Candidate, Composition, ModuleRecord, Repository, Session, SessionCleanupResult, SpecEnrichment } from '../api/generated/types';
 import { APIRequestError, api } from '../api/client';
 
 type Screen = 'registry' | 'spec' | 'composition' | 'modules' | 'jobs';
@@ -61,7 +61,22 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
   const [reason, setReason] = useState('approved for extraction');
   const [planId, setPlanId] = useState('');
   const [message, setMessage] = useState('');
+  const [refreshedRepoId, setRefreshedRepoId] = useState('');
+  const [activeSessionNotice, setActiveSessionNotice] = useState('');
+  const [busyAction, setBusyAction] = useState('');
   const approvedIds = useMemo(() => candidates.filter((c) => c.status === 'approved').map((c) => c.id), [candidates]);
+  const selectedSourceUri = repo?.sourceUri ?? '';
+  const rescanSourceUri = sourceUri.trim() || selectedSourceUri;
+  const rescanSourceType = sourceUri.trim() ? sourceType : (repo?.sourceType ?? sourceType);
+  const rescanLabel = sourceUri.trim() ? 'Rescan source' : repo ? `Rescan ${repo.name}` : 'Rescan source';
+  const sourceNeedsRefresh = Boolean(repo && repo.id !== refreshedRepoId);
+  const nextAction = repo
+    ? intent.trim()
+      ? `Start candidate scan for ${repo.name}.`
+      : sourceNeedsRefresh
+        ? `Rescan ${repo.name} to refresh .sources, then describe what reusable functionality to extract.`
+        : `Describe what reusable functionality to extract, then start candidate scan for ${repo.name}.`
+    : 'Import a repository or choose a registered source.';
 
   const loadRepositories = () => api.list<Repository>('/api/repositories').then((r) => setRepositories(r.items)).catch((e) => onError(e.message));
   const loadSessions = () => api.list<Session>('/api/sessions').then((r) => setSessions(r.items)).catch((e) => onError(e.message));
@@ -74,7 +89,9 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
     if (!sessionId) return Promise.resolve();
     return api.list<Candidate>(`/api/candidates?sessionId=${encodeURIComponent(sessionId)}`).then((r) => setCandidates(r.items)).catch((e) => onError(e.message));
   };
-  const startSession = async (target: Repository) => {
+  const startSession = async (target: Repository, refreshed = false) => {
+    setSourceType(target.sourceType);
+    setSourceUri(target.sourceUri);
     let usable = target;
     if (!target.sourceCheckoutPath) {
       usable = await api.post<Repository>('/api/repositories', {
@@ -85,8 +102,10 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
       });
       await loadRepositories();
       setMessage(`${usable.name} had no .sources checkout, so it was rescanned first.`);
+      refreshed = true;
     }
     setRepo(usable);
+    setRefreshedRepoId(refreshed ? usable.id : '');
     let created: Session;
     try {
       created = await api.post<Session>('/api/sessions', { repositoryId: usable.id });
@@ -108,14 +127,17 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
     setSession(created);
     setCandidates([]);
     setPlanId('');
-    setMessage(`${usable.name} is ready for candidate scanning.`);
+    setActiveSessionNotice(`Extraction session ${created.id} is ${created.phase}.`);
+    setMessage(`${usable.name} is ready for candidate scanning. Agent Jobs will update after Start candidate scan.`);
     await loadSessions();
+    return created;
   };
   const begin = async () => {
+    setBusyAction('Importing source and creating extraction session...');
     try {
       const saved = await api.post<Repository>('/api/repositories', { sourceType, sourceUri });
       await loadRepositories();
-      await startSession(saved);
+      await startSession(saved, true);
     } catch (e) {
       if (e instanceof APIRequestError && e.code === 'repository.duplicate') {
         const existing = e.details?.repository as Repository | undefined;
@@ -127,19 +149,44 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
         }
       }
       throw e;
+    } finally {
+      setBusyAction('');
     }
   };
   const rescan = async () => {
-    const saved = await api.post<Repository>('/api/repositories', { sourceType, sourceUri, rescan: true });
-    await loadRepositories();
-    await startSession(saved);
-    setMessage(`${saved.name} was rescanned into .sources.`);
+    if (!rescanSourceUri) {
+      setMessage('Choose a registered source or enter a repository path before rescanning.');
+      return;
+    }
+    setBusyAction(`Rescanning ${repo?.name ?? 'source'} and creating extraction session...`);
+    try {
+      const saved = await api.post<Repository>('/api/repositories', {
+        sourceType: rescanSourceType,
+        sourceUri: rescanSourceUri,
+        rescan: true
+      });
+      await loadRepositories();
+      const created = await startSession(saved, true);
+      setMessage(`${saved.name} was rescanned into .sources and extraction session ${created.id} was created. Enter an intent and press Start candidate scan to create an Agent Jobs entry.`);
+    } finally {
+      setBusyAction('');
+    }
   };
   const scan = async () => {
     if (!session) return;
     const updated = await api.post<Session>(`/api/sessions/${session.id}/intent`, { specificFunctionality: intent, allowAgentDiscovery: true, expectedUpdatedAt: session.updatedAt });
     setSession(updated);
     await api.post<AgentJob>(`/api/sessions/${session.id}/analysis-jobs`, {});
+    await loadSessions();
+  };
+  const clearPreviousSessions = async () => {
+    const query = session?.id ? `?keepSessionId=${encodeURIComponent(session.id)}` : '';
+    const result = await api.request<SessionCleanupResult>(`/api/sessions${query}`, { method: 'DELETE' });
+    if (result.deleted > 0) {
+      setMessage(`Cleared ${result.deleted} previous extraction ${result.deleted === 1 ? 'session' : 'sessions'}.`);
+    } else {
+      setMessage('No previous extraction sessions could be cleared.');
+    }
     await loadSessions();
   };
   const decide = (candidate: Candidate, action: 'approve' | 'reject' | 'defer' | 'rescan') => {
@@ -162,11 +209,14 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
               <option value="git_url">Git URL</option>
             </select>
             <input value={sourceUri} onChange={(e) => setSourceUri(e.target.value)} placeholder="Repository path or URL" />
-            <button onClick={() => begin().catch((e) => onError(e.message))}>Import to .sources</button>
-            <button onClick={() => rescan().catch((e) => onError(e.message))}>Rescan source</button>
+            <button disabled={Boolean(busyAction)} onClick={() => begin().catch((e) => onError(e.message))}>Import to .sources</button>
+            <button disabled={Boolean(busyAction)} className={sourceNeedsRefresh && !intent.trim() ? 'next-action-button' : ''} onClick={() => rescan().catch((e) => onError(e.message))}>{rescanLabel}</button>
             <button onClick={() => { void loadRepositories(); void loadSessions(); }} aria-label="Refresh registered sources"><RefreshCw size={16} /></button>
           </div>
+          <div className="next-action"><strong>Next action</strong><span>{nextAction}</span></div>
+          {busyAction && <div className="notice progress-notice">{busyAction}</div>}
           {message && <div className="notice">{message}</div>}
+          {activeSessionNotice && <div className="notice session-notice">{activeSessionNotice}</div>}
           {repo && repo.sourceCheckoutPath && <div className="notice">{repo.name} stored at {repo.sourceCheckoutPath}</div>}
           <div className="source-grid">
             <div>
@@ -184,7 +234,13 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
               </div>
             </div>
             <div>
-              <h4>Recent extraction sessions</h4>
+              <div className="section-heading-row">
+                <h4>Recent extraction sessions</h4>
+                <button className="inline-icon-button" disabled={sessions.length === 0 || Boolean(busyAction)} onClick={() => clearPreviousSessions().catch((e) => onError(e.message))}>
+                  <Trash2 size={15} />
+                  <span>Clear previous sessions</span>
+                </button>
+              </div>
               <div className="stack">
                 {sessions.slice(0, 6).map((item) => (
                   <article className={session?.id === item.id ? 'row-card selected' : 'row-card'} key={item.id}>
@@ -201,7 +257,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
         <Panel title="2. Scan candidates">
           <div className="toolbar">
             <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Reusable functionality to extract" />
-            <button disabled={!session} onClick={() => scan().catch((e) => onError(e.message))}>Start candidate scan</button>
+            <button className={session && intent.trim() ? 'next-action-button' : ''} disabled={!session} onClick={() => scan().catch((e) => onError(e.message))}>Start candidate scan</button>
             <button disabled={!session} onClick={() => void loadCandidates()}>Refresh candidates</button>
           </div>
           {session && <div className="notice">{session.repoName} {session.phase}</div>}
