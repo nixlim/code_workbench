@@ -55,27 +55,28 @@ it('shows registered sources so duplicates can be reused', async () => {
   expect(screen.getByText('Use for extraction')).toBeInTheDocument();
 });
 
-it('uses the selected registered source for rescan guidance', async () => {
+it('highlights continue after using a registered source for extraction', async () => {
   const repo = { id: 'repo_1', name: 'existing-repo', sourceType: 'local_path', sourceUri: '/allowed/existing-repo', sourceCheckoutPath: '.sources/existing-repo', createdAt: 'now', updatedAt: 'now' };
+  const session = { id: 'sess_1', repositoryId: repo.id, repoName: repo.name, phase: 'awaiting_user_intent', createdAt: 'now', updatedAt: 'now' };
   vi.mocked(fetch).mockImplementation((url: string | URL | Request, init?: RequestInit) => {
     const path = String(url);
     if (path.includes('/api/repositories') && init?.method === 'POST') {
-      expect(JSON.parse(String(init.body))).toMatchObject({ sourceUri: repo.sourceUri, rescan: true });
+      expect(JSON.parse(String(init.body))).toMatchObject({ sourceUri: repo.sourceUri });
       return Promise.resolve(new Response(JSON.stringify(repo), { status: 201, headers: { 'content-type': 'application/json' } }));
     }
     if (path.includes('/api/sessions') && init?.method === 'POST') {
-      return Promise.resolve(new Response(JSON.stringify({ id: 'sess_1', repositoryId: repo.id, repoName: repo.name, phase: 'awaiting_user_intent', createdAt: 'now', updatedAt: 'now' }), { status: 201, headers: { 'content-type': 'application/json' } }));
+      return Promise.resolve(new Response(JSON.stringify(session), { status: 201, headers: { 'content-type': 'application/json' } }));
     }
-    const body = path.includes('/api/repositories') ? { items: [repo] } : { items: [] };
+    const body = path.includes('/api/repositories') ? { items: [repo] } : path.includes('/api/sessions') ? { items: [session] } : { items: [] };
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
   render(<App />);
   fireEvent.click(await screen.findByText('Use for extraction'));
-  expect(await screen.findByText('Rescan existing-repo to refresh .sources, then describe what reusable functionality to extract.')).toBeInTheDocument();
-  fireEvent.click(screen.getByText('Rescan source'));
-  await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/repositories', expect.objectContaining({ method: 'POST' })));
+  expect(await screen.findByText('Continue the extraction session for existing-repo.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Continue' })).toHaveClass('next-action-button');
+  expect(screen.getByRole('button', { name: 'Rescan source' })).not.toHaveClass('next-action-button');
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
   expect(await screen.findByText('Describe what reusable functionality to extract, then start candidate scan for existing-repo.')).toBeInTheDocument();
-  expect(screen.getByText(/Enter an intent and press Start candidate scan to create an Agent Jobs entry/)).toBeInTheDocument();
 });
 
 it('clears previous extraction sessions while keeping the selected session', async () => {

@@ -131,10 +131,21 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 	if err != nil {
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: "claude executable not found"}
 	}
+	claudeConfigDir := claudeUserConfigDir()
+	if !claudeAuthConfigured(os.Environ()) && claudeConfigDir == "" {
+		return ProviderStart{}, APIError{
+			Status:  502,
+			Code:    "agent_provider.auth_required",
+			Message: "claude_code_tmux requires ANTHROPIC_API_KEY or an existing Claude login in ~/.claude",
+		}
+	}
 	claudeArgs := []string{
-		claudeBin, "--bare",
+		claudeBin,
 		"--print",
-		"--permission-mode", "acceptEdits",
+		"--no-session-persistence",
+		"--disable-slash-commands",
+		"--dangerously-skip-permissions",
+		"--model", "claude-opus-4-6",
 		"--allowedTools", "Read,Grep,Glob,Edit,Write,MultiEdit,Bash(git *),Bash(go test *),Bash(go list *)",
 		"--disallowedTools", "WebFetch,WebSearch",
 	}
@@ -143,13 +154,20 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: err.Error()}
 	}
 	sessionCommand := "cd " + shellQuote(workspace) + "; " + command + " < " + shellQuote(job.PromptPath) + " > " + shellQuote(transcript) + " 2>&1; code=$?; printf '%s\\n' \"$code\" > " + shellQuote(exitCodePath) + "; exit \"$code\""
-	env := filteredEnv(home, map[string]string{
+	extraEnv := map[string]string{
 		"CODE_WORKBENCH_JOB_ID":       job.ID,
 		"CODE_WORKBENCH_ROLE":         job.Role,
 		"CODE_WORKBENCH_OUTPUT_ROOT":  output,
 		"CODE_WORKBENCH_DENIED_PATHS": strings.Join(deniedPaths(p.dataDir, home), string(os.PathListSeparator)),
 		"TMPDIR":                      filepath.Join(output, "tmp"),
-	})
+	}
+	if claudeConfigDir != "" {
+		extraEnv["CLAUDE_CONFIG_DIR"] = claudeConfigDir
+		if realHome, err := os.UserHomeDir(); err == nil && realHome != "" {
+			extraEnv["HOME"] = realHome
+		}
+	}
+	env := filteredEnv(home, extraEnv)
 	if err := p.runner(ctx, tmuxName, socketPath, sessionCommand, env, workspace); err != nil {
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: err.Error()}
 	}
@@ -161,7 +179,7 @@ func sandboxedCommand(goos, profilePath, outputRoot, workspace, claudeBin string
 	switch goos {
 	case "darwin":
 		// Claude Code's native macOS binary aborts under sandbox-exec before it can
-		// emit diagnostics. Keep the job isolated with a per-job cwd, HOME, TMPDIR,
+		// emit diagnostics. Keep the job isolated with a per-job cwd, TMPDIR,
 		// constrained prompts, and Claude's tool allowlist while Linux keeps the
 		// stronger OS-level wrapper below.
 		_ = os.WriteFile(profilePath, []byte("macOS sandbox-exec disabled for claude_code_tmux; see server.log job diagnostics\n"), 0o600)
@@ -227,7 +245,7 @@ func filteredEnv(home string, extra map[string]string) []string {
 	out := []string{"HOME=" + home}
 	for _, kv := range os.Environ() {
 		name := strings.SplitN(kv, "=", 2)[0]
-		if keep[name] {
+		if keep[name] || claudeAuthEnvName(name) {
 			out = append(out, kv)
 		}
 	}
@@ -235,6 +253,53 @@ func filteredEnv(home string, extra map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+func claudeAuthConfigured(env []string) bool {
+	for _, kv := range env {
+		name, value, ok := strings.Cut(kv, "=")
+		if ok && claudeAuthEnvName(name) && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeAuthEnvName(name string) bool {
+	if name == "ANTHROPIC_API_KEY" || name == "CLAUDE_CODE_OAUTH_TOKEN" {
+		return true
+	}
+	for _, prefix := range []string{"AWS_", "GOOGLE_", "VERTEX_"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeUserConfigDir() string {
+	if configured := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); configured != "" {
+		if claudeCredentialsAvailable(configured) {
+			return configured
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	dir := filepath.Join(home, ".claude")
+	if claudeCredentialsAvailable(dir) {
+		return dir
+	}
+	return ""
+}
+
+func claudeCredentialsAvailable(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dir, ".credentials.json"))
+	return err == nil && !info.IsDir()
 }
 
 func deniedPaths(dataDir, jobHome string) []string {
@@ -694,8 +759,15 @@ func (a *App) tryStartQueued(ctx context.Context) {
 		}
 		start, err := provider.Start(ctx, job)
 		if err != nil {
-			_, _ = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='failed', error_code='agent_provider.start_failed', finished_at=? WHERE id=?`, now(), job.ID)
-			a.log.Event("job_start_failed", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider, "error": err.Error()})
+			code := "agent_provider.start_failed"
+			if apiErr := (APIError{}); errors.As(err, &apiErr) && apiErr.Code != "" {
+				code = apiErr.Code
+			}
+			_, _ = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='failed', error_code=?, finished_at=? WHERE id=?`, code, now(), job.ID)
+			if job.Role == "repo_analysis" && job.SubjectType == "session" {
+				_ = a.transitionSession(ctx, job.SubjectID, "", "failed_analysis")
+			}
+			a.log.Event("job_start_failed", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider, "errorCode": code, "error": err.Error()})
 			continue
 		}
 		_, _ = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='running', tmux_session_name=?, transcript_path=?, output_artifact_path=?, started_at=?, last_heartbeat_at=? WHERE id=?`, start.TmuxSessionName, start.TranscriptPath, start.OutputPath, now(), now(), job.ID)

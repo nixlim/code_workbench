@@ -56,6 +56,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
   const [sessions, setSessions] = useState<Session[]>([]);
   const [repo, setRepo] = useState<Repository | null>(null);
   const [session, setSession] = useState<Session | null>(null);
+  const [pendingSessionId, setPendingSessionId] = useState('');
   const [intent, setIntent] = useState('');
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [reason, setReason] = useState('approved for extraction');
@@ -69,9 +70,11 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
   const rescanSourceUri = sourceUri.trim() || selectedSourceUri;
   const rescanSourceType = sourceUri.trim() ? sourceType : (repo?.sourceType ?? sourceType);
   const rescanLabel = sourceUri.trim() ? 'Rescan source' : repo ? `Rescan ${repo.name}` : 'Rescan source';
-  const sourceNeedsRefresh = Boolean(repo && repo.id !== refreshedRepoId);
+  const sourceNeedsRefresh = Boolean(repo && !session && !pendingSessionId && repo.id !== refreshedRepoId);
   const nextAction = repo
-    ? intent.trim()
+    ? pendingSessionId
+      ? `Continue the extraction session for ${repo.name}.`
+      : intent.trim()
       ? `Start candidate scan for ${repo.name}.`
       : sourceNeedsRefresh
         ? `Rescan ${repo.name} to refresh .sources, then describe what reusable functionality to extract.`
@@ -89,7 +92,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
     if (!sessionId) return Promise.resolve();
     return api.list<Candidate>(`/api/candidates?sessionId=${encodeURIComponent(sessionId)}`).then((r) => setCandidates(r.items)).catch((e) => onError(e.message));
   };
-  const startSession = async (target: Repository, refreshed = false) => {
+  const startSession = async (target: Repository, refreshed = false, activate = true) => {
     setSourceType(target.sourceType);
     setSourceUri(target.sourceUri);
     let usable = target;
@@ -124,11 +127,17 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
         throw e;
       }
     }
-    setSession(created);
+    if (activate) {
+      setSession(created);
+      setPendingSessionId('');
+    } else {
+      setSession(null);
+      setPendingSessionId(created.id);
+    }
     setCandidates([]);
     setPlanId('');
-    setActiveSessionNotice(`Extraction session ${created.id} is ${created.phase}.`);
-    setMessage(`${usable.name} is ready for candidate scanning. Agent Jobs will update after Start candidate scan.`);
+    setActiveSessionNotice(activate ? `Extraction session ${created.id} is ${created.phase}.` : `Extraction session ${created.id} is ready. Press Continue to select it.`);
+    setMessage(activate ? `${usable.name} is ready for candidate scanning. Agent Jobs will update after Start candidate scan.` : `${usable.name} has a new extraction session. Continue it before entering intent.`);
     await loadSessions();
     return created;
   };
@@ -189,6 +198,13 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
     }
     await loadSessions();
   };
+  const continueSession = (item: Session) => {
+    setSession(item);
+    setPendingSessionId('');
+    setRepo(repositories.find((r) => r.id === item.repositoryId) ?? repo);
+    setActiveSessionNotice(`Extraction session ${item.id} is ${item.phase}.`);
+    void loadCandidates(item.id);
+  };
   const decide = (candidate: Candidate, action: 'approve' | 'reject' | 'defer' | 'rescan') => {
     void api.post<Candidate>(`/api/candidates/${candidate.id}/${action}`, { reason }).then(() => loadCandidates(candidate.sessionId)).catch((e) => onError(e.message));
   };
@@ -227,7 +243,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
                     <strong>{item.name}</strong>
                     <span>{item.sourceType}</span>
                     <span>{item.sourceCheckoutPath || item.sourceUri}</span>
-                    <button onClick={() => startSession(item).catch((e) => onError(e.message))}>Use for extraction</button>
+                    <button onClick={() => startSession(item, false, false).catch((e) => onError(e.message))}>Use for extraction</button>
                   </article>
                 ))}
                 {repositories.length === 0 && <div className="notice">No registered sources.</div>}
@@ -243,10 +259,10 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
               </div>
               <div className="stack">
                 {sessions.slice(0, 6).map((item) => (
-                  <article className={session?.id === item.id ? 'row-card selected' : 'row-card'} key={item.id}>
+                  <article className={session?.id === item.id || pendingSessionId === item.id ? 'row-card selected' : 'row-card'} key={item.id}>
                     <strong>{item.repoName}</strong>
                     <span>{item.phase}</span>
-                    <button onClick={() => { setSession(item); setRepo(repositories.find((r) => r.id === item.repositoryId) ?? repo); void loadCandidates(item.id); }}>Continue</button>
+                    <button className={pendingSessionId === item.id ? 'next-action-button' : ''} onClick={() => continueSession(item)}>Continue</button>
                   </article>
                 ))}
                 {sessions.length === 0 && <div className="notice">No extraction sessions.</div>}

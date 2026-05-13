@@ -535,6 +535,41 @@ func TestCandidateReportImportFailureMarksJobFailed(t *testing.T) {
 	}
 }
 
+func TestClaudeAuthEnvIsForwardedToJobEnvironment(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	env := filteredEnv("/tmp/job-home", map[string]string{"CODE_WORKBENCH_JOB_ID": "job_1"})
+	if !containsEnv(env, "ANTHROPIC_API_KEY=test-key") {
+		t.Fatalf("ANTHROPIC_API_KEY was not forwarded: %v", env)
+	}
+	if !claudeAuthConfigured(env) {
+		t.Fatalf("claude auth was not detected")
+	}
+}
+
+func TestClaudeUserConfigDirRequiresCredentials(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	if got := claudeUserConfigDir(); got != "" {
+		t.Fatalf("expected no config dir without credentials, got %s", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := claudeUserConfigDir(); got != dir {
+		t.Fatalf("config dir=%s want %s", got, dir)
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, kv := range env {
+		if kv == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCandidateReportRequiresInputAndOutputPorts(t *testing.T) {
 	app, repoPath := newTestApp(t)
 	_, repo := doJSON(t, app, http.MethodPost, "/api/repositories", map[string]any{"sourceType": "local_path", "sourceUri": repoPath})

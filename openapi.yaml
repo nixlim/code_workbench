@@ -246,7 +246,7 @@ components:
           properties:
             code:
               type: string
-              enum: [request.invalid_json, request.missing_field, request.unknown_field, request.invalid_enum, path.invalid, resource.not_found, repository.duplicate, session.invalid_transition, state.conflict, candidate.not_approved, candidate.invalid_transition, agent_job.not_running, blueprint.invalid, blueprint.port_type_mismatch, candidate_report.invalid, module_output.invalid, job.timeout, job.interrupted, repository.clone_failed, agent_provider.start_failed, artifact.write_failed, database.operation_failed]
+              enum: [request.invalid_json, request.missing_field, request.unknown_field, request.invalid_enum, path.invalid, resource.not_found, repository.duplicate, session.invalid_transition, state.conflict, candidate.not_approved, candidate.invalid_transition, agent_job.not_running, blueprint.invalid, blueprint.port_type_mismatch, candidate_report.invalid, module_output.invalid, job.timeout, job.interrupted, repository.clone_failed, agent_provider.start_failed, agent_provider.auth_required, artifact.write_failed, database.operation_failed]
             message: {type: string}
             details: {type: object, additionalProperties: true}
     Port: {type: object, required: [name, type], properties: {name: {type: string, pattern: '^[a-z][a-z0-9_]{0,63}$'}, type: {type: string, pattern: '^[A-Z][A-Za-z0-9]*(<([A-Z][A-Za-z0-9]*)(,[A-Z][A-Za-z0-9]*)*>)?$'}, required: {type: boolean}}}

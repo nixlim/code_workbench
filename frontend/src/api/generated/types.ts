@@ -1,4 +1,4 @@
-// Generated from openapi.yaml sha256:9949666789af137c059710ca8d8cc6d1ff83a0971ad6f9317b31f06dc93c5626
+// Generated from openapi.yaml sha256:608a6d3ab5934b0ee34e2ddd30bcc8b4c40df17bfa57589c890c155d24066266
 export type APIRecord = Record<string, unknown>;
 
 export interface ListEnvelope<T = APIRecord> {
