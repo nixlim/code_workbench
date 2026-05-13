@@ -117,7 +117,7 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 	if output == "" {
 		output = filepath.Join(root, "output")
 	}
-	for _, d := range []string{workspace, filepath.Join(workspace, "read"), home, output} {
+	for _, d := range []string{workspace, filepath.Join(workspace, "read"), home, output, filepath.Join(output, "tmp")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return ProviderStart{}, err
 		}
@@ -133,21 +133,22 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 	}
 	claudeArgs := []string{
 		claudeBin, "--bare",
+		"--print",
 		"--permission-mode", "acceptEdits",
 		"--allowedTools", "Read,Grep,Glob,Edit,Write,MultiEdit,Bash(git *),Bash(go test *),Bash(go list *)",
 		"--disallowedTools", "WebFetch,WebSearch",
-		job.PromptPath,
 	}
 	command, err := sandboxedCommand(runtime.GOOS, profilePath, output, workspace, claudeBin, claudeArgs)
 	if err != nil {
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: err.Error()}
 	}
-	sessionCommand := "cd " + shellQuote(workspace) + "; " + command + " > " + shellQuote(transcript) + " 2>&1; code=$?; printf '%s\\n' \"$code\" > " + shellQuote(exitCodePath) + "; exit \"$code\""
+	sessionCommand := "cd " + shellQuote(workspace) + "; " + command + " < " + shellQuote(job.PromptPath) + " > " + shellQuote(transcript) + " 2>&1; code=$?; printf '%s\\n' \"$code\" > " + shellQuote(exitCodePath) + "; exit \"$code\""
 	env := filteredEnv(home, map[string]string{
 		"CODE_WORKBENCH_JOB_ID":       job.ID,
 		"CODE_WORKBENCH_ROLE":         job.Role,
 		"CODE_WORKBENCH_OUTPUT_ROOT":  output,
 		"CODE_WORKBENCH_DENIED_PATHS": strings.Join(deniedPaths(p.dataDir, home), string(os.PathListSeparator)),
+		"TMPDIR":                      filepath.Join(output, "tmp"),
 	})
 	if err := p.runner(ctx, tmuxName, socketPath, sessionCommand, env, workspace); err != nil {
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: err.Error()}
@@ -159,24 +160,12 @@ func sandboxedCommand(goos, profilePath, outputRoot, workspace, claudeBin string
 	readRoots := sandboxReadRoots(claudeBin)
 	switch goos {
 	case "darwin":
-		if _, err := exec.LookPath("sandbox-exec"); err != nil {
-			return "", errors.New("sandbox-exec is required for claude_code_tmux on darwin")
-		}
-		readRules := `(subpath "` + workspace + `") (subpath "` + outputRoot + `")`
-		for _, root := range readRoots {
-			readRules += ` (subpath "` + root + `")`
-		}
-		profile := `(version 1)
-		(deny default)
-		(allow process*)
-		(allow sysctl-read)
-		(allow file-read* ` + readRules + `)
-		(allow file-write* (subpath "` + outputRoot + `"))
-		`
-		if err := os.WriteFile(profilePath, []byte(profile), 0o600); err != nil {
-			return "", err
-		}
-		return "sandbox-exec -f " + shellQuote(profilePath) + " " + shellJoin(args), nil
+		// Claude Code's native macOS binary aborts under sandbox-exec before it can
+		// emit diagnostics. Keep the job isolated with a per-job cwd, HOME, TMPDIR,
+		// constrained prompts, and Claude's tool allowlist while Linux keeps the
+		// stronger OS-level wrapper below.
+		_ = os.WriteFile(profilePath, []byte("macOS sandbox-exec disabled for claude_code_tmux; see server.log job diagnostics\n"), 0o600)
+		return shellJoin(args), nil
 	case "linux":
 		if _, err := exec.LookPath("bwrap"); err != nil {
 			return "", errors.New("bwrap is required for claude_code_tmux on linux")
@@ -234,7 +223,7 @@ func shellQuote(s string) string {
 }
 
 func filteredEnv(home string, extra map[string]string) []string {
-	keep := map[string]bool{"PATH": true, "TMPDIR": true, "SHELL": true, "TERM": true}
+	keep := map[string]bool{"PATH": true, "SHELL": true, "TERM": true}
 	out := []string{"HOME=" + home}
 	for _, kv := range os.Environ() {
 		name := strings.SplitN(kv, "=", 2)[0]
@@ -342,6 +331,9 @@ func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, s
 	switch {
 	case role == "repo_analysis", role == "candidate_scan":
 		data["OutputContract"] = "Emit candidate-report.json with the CandidateReport schema: {candidates: [{proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, sourcePaths, reusableRationale, couplingNotes, dependencies, sideEffects, testsFound, missingTests, ports: {inputs, outputs}, workbenchNode}]}."
+		if subjectType == "session" {
+			a.addSessionIntentToPrompt(ctx, data, subjectID)
+		}
 	case role == "extraction", role == "module_extraction":
 		data["OutputContract"] = "For each approved candidate, read its sourcePaths from the repo checkout, convert or rewrite the module into the candidate targetLanguage (default go), and emit production source files, unit tests, manifest.json, config.schema.json, docs, and provenance metadata under the OutputRoot."
 		var approvedJSON, rejectedJSON string
@@ -366,6 +358,36 @@ func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, s
 	default:
 		data["OutputContract"] = "Write outputs under the OutputRoot and emit the required JSON contract for this role."
 	}
+}
+
+func (a *App) addSessionIntentToPrompt(ctx context.Context, data map[string]any, sessionID string) {
+	var intentPath string
+	if err := a.store.DB.QueryRowContext(ctx, `SELECT COALESCE(intent_json_path,'') FROM repo_sessions WHERE id=?`, sessionID).Scan(&intentPath); err != nil || intentPath == "" {
+		return
+	}
+	b, err := os.ReadFile(intentPath)
+	if err != nil || !json.Valid(b) {
+		return
+	}
+	var intent struct {
+		SpecificFunctionality string   `json:"specificFunctionality"`
+		AreasOfInterest       []string `json:"areasOfInterest"`
+		SourceHints           []string `json:"sourceHints"`
+		AvoidPatterns         []string `json:"avoidPatterns"`
+		PreferredTargetLang   string   `json:"preferredTargetLanguage"`
+		AllowAgentDiscovery   bool     `json:"allowAgentDiscovery"`
+	}
+	if err := json.Unmarshal(b, &intent); err != nil {
+		return
+	}
+	data["SessionIntentPath"] = intentPath
+	data["SpecificFunctionality"] = intent.SpecificFunctionality
+	data["AreasOfInterest"] = intent.AreasOfInterest
+	data["SourceHints"] = intent.SourceHints
+	data["AvoidPatterns"] = intent.AvoidPatterns
+	data["PreferredTargetLanguage"] = intent.PreferredTargetLang
+	data["AllowAgentDiscovery"] = intent.AllowAgentDiscovery
+	data["SessionIntentJSON"] = string(b)
 }
 
 func (a *App) materializeReadRoots(ctx context.Context, role, subjectType, subjectID, readRoot string) error {
@@ -882,7 +904,10 @@ func (a *App) CompleteJob(ctx context.Context, id string, exitCode int, errorCod
 	if err != nil {
 		return err
 	}
-	a.log.Event("job_finished", map[string]any{"jobId": id, "status": status, "errorCode": errorCode})
+	if job.Role == "repo_analysis" && status == "failed" {
+		_ = a.transitionSession(ctx, job.SubjectID, "", "failed_analysis")
+	}
+	a.log.Event("job_finished", map[string]any{"jobId": id, "status": status, "exitCode": exitCode, "errorCode": errorCode})
 	return nil
 }
 

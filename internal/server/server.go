@@ -404,7 +404,7 @@ func validSessionTransition(from, to string) bool {
 		"created":              {"awaiting_user_intent", "cancelled"},
 		"awaiting_user_intent": {"ready_for_analysis", "needs_user_input", "cancelled"},
 		"ready_for_analysis":   {"queued", "needs_user_input", "cancelled"},
-		"queued":               {"analysing", "paused", "cancelled"},
+		"queued":               {"analysing", "failed_analysis", "paused", "cancelled"},
 		"analysing":            {"candidates_ready", "failed_analysis", "needs_user_input", "cancelled"},
 		"candidates_ready":     {"awaiting_approval", "duplicate_detected", "conflict_detected", "cancelled"},
 		"awaiting_approval":    {"extraction_planned", "needs_user_input", "cancelled"},

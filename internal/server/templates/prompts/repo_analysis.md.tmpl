@@ -5,6 +5,22 @@ Subject: {{.SubjectType}} {{.SubjectID}}
 
 Analyze the repository checkout at {{.WorkspaceReadRoot}}/repo. Discover reusable module candidates and emit a CandidateReport.
 
+{{if .SpecificFunctionality}}
+## User intent
+
+Prioritize reusable candidates that support this requested functionality:
+{{.SpecificFunctionality}}
+
+{{if .AreasOfInterest}}Areas of interest:
+{{range .AreasOfInterest}}- {{.}}
+{{end}}{{end}}{{if .SourceHints}}Source hints:
+{{range .SourceHints}}- {{.}}
+{{end}}{{end}}{{if .AvoidPatterns}}Avoid patterns:
+{{range .AvoidPatterns}}- {{.}}
+{{end}}{{end}}{{if .PreferredTargetLanguage}}Preferred target language: {{.PreferredTargetLanguage}}
+{{end}}Allow additional agent discovery: {{.AllowAgentDiscovery}}
+{{end}}
+
 ## Output contract
 
 {{.OutputContract}}

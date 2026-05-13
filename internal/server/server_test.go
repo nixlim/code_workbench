@@ -128,6 +128,13 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	if job["promptPath"] != filepath.Join(app.cfg.DataDir, "jobs", jobID, "prompt.md") {
 		t.Fatalf("prompt path=%v", job["promptPath"])
 	}
+	promptBytes, err := os.ReadFile(job["promptPath"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(promptBytes), "Prioritize reusable candidates") || !strings.Contains(string(promptBytes), "config") {
+		t.Fatalf("prompt did not include user intent:\n%s", string(promptBytes))
+	}
 	code, session = doJSON(t, app, http.MethodGet, "/api/sessions/"+sessionID, nil)
 	if code != 200 || session["phase"] != "analysing" {
 		t.Fatalf("queued analysis did not enter analysing phase status=%d body=%v", code, session)
@@ -507,15 +514,24 @@ func TestCandidateReportImportFailureMarksJobFailed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := app.store.DB.Exec(`UPDATE repo_sessions SET phase='analysing' WHERE id=?`, sessionID); err != nil {
+		t.Fatal(err)
+	}
 	if err := app.CompleteJob(context.Background(), "bad_report", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	var status, code string
+	var status, code, phase string
 	if err := app.store.DB.QueryRow(`SELECT status,error_code FROM agent_jobs WHERE id='bad_report'`).Scan(&status, &code); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.DB.QueryRow(`SELECT phase FROM repo_sessions WHERE id=?`, sessionID).Scan(&phase); err != nil {
 		t.Fatal(err)
 	}
 	if status != "failed" || code != "candidate_report.invalid" {
 		t.Fatalf("status=%s code=%s", status, code)
+	}
+	if phase != "failed_analysis" {
+		t.Fatalf("phase=%s", phase)
 	}
 }
 

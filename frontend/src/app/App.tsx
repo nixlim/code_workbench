@@ -491,9 +491,16 @@ function Jobs({ onError }: { onError: (value: string) => void }) {
 function JobInspector({ job }: { job: AgentJob }) {
   const events = job.transcript?.events ?? [];
   const files = job.outputFiles ?? [];
+  const hasFailureDetail = job.errorCode || job.exitCode !== undefined;
   return (
     <section className="panel job-inspector">
       <h3>{job.role} {job.status}</h3>
+      {hasFailureDetail && (
+        <div className="job-status-detail">
+          {job.errorCode && <span><strong>errorCode</strong>{job.errorCode}</span>}
+          {job.exitCode !== undefined && <span><strong>exitCode</strong>{job.exitCode}</span>}
+        </div>
+      )}
       <div className="metrics-grid">
         {Object.entries(job.metrics ?? {}).map(([key, value]) => <span key={key}><strong>{key}</strong>{value}</span>)}
         {Object.keys(job.metrics ?? {}).length === 0 && <span><strong>metrics</strong>none yet</span>}

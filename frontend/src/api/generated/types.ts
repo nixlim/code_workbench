@@ -101,6 +101,7 @@ export interface AgentJob {
   tmuxSessionName?: string;
   timeoutSeconds?: number;
   exitCode?: number;
+  errorCode?: string;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;

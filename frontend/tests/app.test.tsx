@@ -132,6 +132,8 @@ it('surfaces agent job prompts transcripts metrics and detected events', async (
       transcriptPath: '/tmp/job_1/output/transcript.txt',
       outputArtifactPath: '/tmp/job_1/output',
       timeoutSeconds: 3600,
+      exitCode: 134,
+      errorCode: 'job.interrupted',
       createdAt: 'now'
     };
     const body = path.endsWith('/api/agent-jobs/job_1')
@@ -147,5 +149,9 @@ it('surfaces agent job prompts transcripts metrics and detected events', async (
   expect(await screen.findByText('Extract paperclip module')).toBeInTheDocument();
   expect(screen.getAllByText('Do you want to continue?').length).toBeGreaterThan(0);
   expect(screen.getByText('promptBytes')).toBeInTheDocument();
+  expect(screen.getByText('errorCode')).toBeInTheDocument();
+  expect(screen.getByText('job.interrupted')).toBeInTheDocument();
+  expect(screen.getByText('exitCode')).toBeInTheDocument();
+  expect(screen.getByText('134')).toBeInTheDocument();
   expect(screen.getByText('manifest.json')).toBeInTheDocument();
 });
