@@ -1,4 +1,4 @@
-// Generated from openapi.yaml sha256:608a6d3ab5934b0ee34e2ddd30bcc8b4c40df17bfa57589c890c155d24066266
+// Generated from openapi.yaml sha256:06b946892248b99773be49d988d3bd43def64bf6da506a26f4d1a3d04c715231
 export type APIRecord = Record<string, unknown>;
 
 export interface ListEnvelope<T = APIRecord> {
@@ -108,8 +108,10 @@ export interface AgentJob {
   promptPath?: string;
   transcriptPath?: string;
   outputArtifactPath?: string;
+  attachCommand?: string;
   prompt?: JobTextArtifact;
   transcript?: JobTextArtifact & { lineCount?: number; events?: AgentLogEvent[] };
+  activityLog?: JobTextArtifact & { lineCount?: number; events?: AgentLogEvent[] };
   outputFiles?: Array<{ path: string; size: number }>;
   metrics?: Record<string, number>;
 }

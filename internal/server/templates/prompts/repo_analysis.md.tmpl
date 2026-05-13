@@ -10,6 +10,10 @@ Inspect the repository at {{.WorkspaceReadRoot}}/repo and propose reusable candi
 Do not analyse unrelated repositories unless explicitly instructed.
 Do not modify code during discovery.
 Return candidates for this repository only.
+Keep discovery bounded: inspect the repository manifest plus the most relevant source files for the requested areas, then emit the report. Do not perform open-ended full-tree analysis.
+Use at most 6 tool calls total. If you have already inspected the manifest plus 3-5 relevant files, stop reading and emit the CandidateReport.
+Avoid commands that produce large output. If a tool result says output was persisted outside {{.WorkspaceReadRoot}}, do not read that persisted file; rerun a narrower command inside {{.WorkspaceReadRoot}} instead.
+Return the 1-3 strongest candidates only.
 
 {{if .SpecificFunctionality}}
 ## User intent
@@ -69,18 +73,13 @@ Focus especially on:
 {{.OutputContract}}
 
 Emit only the CandidateReport JSON object. Do not wrap it in Markdown or prose.
-The backend captures stdout and writes {{.CandidateReportPath}} if needed.
-Write any supporting logs/artifacts under {{.OutputRoot}} only if they are necessary.
+The backend captures stdout, validates it with outvalid, and writes {{.CandidateReportPath}}.
+Do not use Write, Edit, or MultiEdit. Do not write files during repository analysis.
 
 {{if .StructuredOutputSchema}}
-Before emitting the final JSON, validate a draft with outvalid:
-
-```bash
-{{.OutvalidPath}} --schema {{.StructuredOutputSchemaPath}} --input /tmp/code-workbench-candidate-report-draft.json --writeTo {{.CandidateReportPath}}
-```
-
-If validation fails, read the numbered errors, fix the draft, and retry. Allow up to 3 validation attempts.
-After validation passes, emit the same validated CandidateReport JSON on stdout.
+Claude is started with a structured JSON schema for this job. Emit through that structured output channel only.
+The backend also provides {{.OutvalidPath}} and {{.StructuredOutputSchemaPath}} in the read workspace and validates the captured result with outvalid after the process exits.
+Do not call outvalid manually for this role; validation happens after stdout capture.
 
 The JSON object must match this JSON Schema:
 
@@ -92,4 +91,4 @@ The JSON object must match this JSON Schema:
 ## Safety rules
 
 {{.DeniedPathRules}}
-Read only from {{.WorkspaceReadRoot}}. Write only under {{.OutputRoot}} and {{.CandidateReportPath}}.
+Read only from {{.WorkspaceReadRoot}}. Do not write files during repository analysis.

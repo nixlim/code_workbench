@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { App } from '../src/app/App';
 
 beforeEach(() => {
+  window.localStorage.clear();
   vi.stubGlobal('fetch', vi.fn((url: string) => {
     const body = url.includes('palette') ? { items: [] } : { items: [] };
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
@@ -12,6 +13,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  window.localStorage.clear();
 });
 
 it('renders all primary screens without authentication', async () => {

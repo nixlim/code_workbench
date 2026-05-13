@@ -123,6 +123,7 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 		}
 	}
 	transcript := filepath.Join(output, "transcript.txt")
+	debugLog := filepath.Join(output, "claude-debug.log")
 	exitCodePath := filepath.Join(output, "exit_code")
 	profilePath := filepath.Join(root, "sandbox.profile")
 	tmuxName := "code-workbench-" + job.ID
@@ -143,11 +144,20 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 	claudeArgs := []string{
 		claudeBin,
 		"--print",
+		"--max-turns", "40",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
 		"--no-session-persistence",
 		"--disable-slash-commands",
+		"--append-system-prompt", claudeSystemPromptForRole(job.Role),
+		"--strict-mcp-config",
+		"--setting-sources", "local",
+		"--no-chrome",
+		"--tools", "Read,Grep,Glob,Bash",
 		"--dangerously-skip-permissions",
 		"--model", "claude-opus-4-6",
-		"--allowedTools", "Read,Grep,Glob,Edit,Write,MultiEdit,Bash(git *),Bash(go test *),Bash(go list *)",
+		"--debug-file", debugLog,
+		"--allowedTools", "Read,Grep,Glob,Bash(git *),Bash(go test *),Bash(go list *)",
 		"--disallowedTools", "WebFetch,WebSearch",
 	}
 	if schema := jsonSchemaForRole(job.Role); schema != "" {
@@ -157,13 +167,12 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 	if err != nil {
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: err.Error()}
 	}
-	sessionCommand := "cd " + shellQuote(workspace) + "; " + command + " < " + shellQuote(job.PromptPath) + " > " + shellQuote(transcript) + " 2>&1; code=$?; printf '%s\\n' \"$code\" > " + shellQuote(exitCodePath) + "; exit \"$code\""
+	sessionCommand := "cd " + shellQuote(workspace) + "; code=130; trap 'printf \"%s\\n\" \"$code\" > " + shellQuote(exitCodePath) + "' EXIT; " + command + " < " + shellQuote(job.PromptPath) + " > " + shellQuote(transcript) + " 2>&1; code=$?; exit \"$code\""
 	extraEnv := map[string]string{
 		"CODE_WORKBENCH_JOB_ID":       job.ID,
 		"CODE_WORKBENCH_ROLE":         job.Role,
 		"CODE_WORKBENCH_OUTPUT_ROOT":  output,
 		"CODE_WORKBENCH_DENIED_PATHS": strings.Join(deniedPaths(p.dataDir, home), string(os.PathListSeparator)),
-		"TMPDIR":                      filepath.Join(output, "tmp"),
 	}
 	if claudeConfigDir != "" {
 		if realHome, err := os.UserHomeDir(); err == nil && realHome != "" {
@@ -171,6 +180,9 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 		}
 	}
 	env := filteredEnvForClaude(home, extraEnv, !useClaudeLogin)
+	if useClaudeLogin {
+		env = mergedEnv(os.Environ(), extraEnv)
+	}
 	if err := p.runner(ctx, tmuxName, socketPath, sessionCommand, env, workspace); err != nil {
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: err.Error()}
 	}
@@ -245,6 +257,43 @@ func shellQuote(s string) string {
 
 func filteredEnv(home string, extra map[string]string) []string {
 	return filteredEnvForClaude(home, extra, true)
+}
+
+func mergedEnv(base []string, extra map[string]string) []string {
+	values := map[string]string{}
+	order := []string{}
+	for _, kv := range base {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if _, seen := values[name]; !seen {
+			order = append(order, name)
+		}
+		values[name] = value
+	}
+	for k, v := range extra {
+		if _, seen := values[k]; !seen {
+			order = append(order, k)
+		}
+		values[k] = v
+	}
+	out := make([]string, 0, len(order))
+	for _, name := range order {
+		out = append(out, name+"="+values[name])
+	}
+	return out
+}
+
+func claudeSystemPromptForRole(role string) string {
+	switch role {
+	case "repo_analysis", "candidate_scan":
+		return "Complete repository analysis within 6 tool calls. Emit at most 3 candidates. Prefer a useful structured CandidateReport over additional exploration. Never read persisted tool-output files outside the job workspace; rerun narrower commands inside the workspace instead."
+	case "extraction", "module_extraction":
+		return "Complete extraction within 3 tool calls and 8 output files. Generate a narrow reusable core, not a full port. Keep generated source under 120 lines and tests under 80 lines. Do not copy source files. Write a short artifact set, then stop."
+	default:
+		return "Complete the requested work with bounded tool use. Avoid large command output. Finish with a concise completion summary."
+	}
 }
 
 func filteredEnvForClaude(home string, extra map[string]string, includeAuthEnv bool) []string {
@@ -420,7 +469,7 @@ func (a *App) outputRootForJob(role, subjectType, subjectID, jobID string) strin
 func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, subjectType, subjectID string) {
 	switch {
 	case role == "repo_analysis", role == "candidate_scan":
-		data["OutputContract"] = "Emit exactly one CandidateReport JSON object. The backend will store it as candidate-report.json. The object must contain candidates with proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, sourcePaths, reusableRationale, couplingNotes, dependencies, sideEffects, testsFound, missingTests, ports.inputs, ports.outputs, and workbenchNode."
+		data["OutputContract"] = "Emit exactly one CandidateReport JSON object containing 1-3 candidates. The backend will store it as candidate-report.json. The object must contain candidates with proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, sourcePaths, reusableRationale, couplingNotes, dependencies, sideEffects, testsFound, missingTests, ports.inputs, ports.outputs, and workbenchNode."
 		if subjectType == "session" {
 			a.addSessionIntentToPrompt(ctx, data, subjectID)
 		}
@@ -1062,7 +1111,7 @@ func schemaFilenameForRole(role string) string {
 }
 
 func candidateReportJSONSchema() string {
-	return `{"type":"object","additionalProperties":false,"required":["candidates"],"properties":{"apiVersion":{"type":"string"},"kind":{"type":"string","enum":["CandidateReport"]},"metadata":{"type":"object","additionalProperties":false,"properties":{"sessionId":{"type":"string"},"repoName":{"type":"string"}}},"candidates":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["proposedName","description","moduleKind","targetLanguage","confidence","extractionRisk","sourcePaths","reusableRationale","couplingNotes","dependencies","sideEffects","testsFound","missingTests","ports","workbenchNode"],"properties":{"id":{"type":"string","minLength":1},"repo":{"type":"string","minLength":1},"sessionId":{"type":"string","minLength":1},"proposedName":{"type":"string","minLength":1},"description":{"type":"string","minLength":1},"moduleKind":{"type":"string","minLength":1},"targetLanguage":{"type":"string","minLength":1},"confidence":{"type":"string","enum":["low","medium","high"]},"extractionRisk":{"type":"string","enum":["low","medium","high"]},"recommendedAction":{"type":"string","enum":["approve","defer","reject","rescan"]},"sourcePaths":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"reusableRationale":{"type":"string","minLength":1},"couplingNotes":{"type":"string","minLength":1},"dependencies":{"type":"array","items":{"type":"string"}},"sideEffects":{"type":"array","items":{"type":"string"}},"testsFound":{"type":"array","items":{"type":"string"}},"missingTests":{"type":"array","items":{"type":"string"}},"risks":{"type":"array","items":{"type":"string"}},"extractionNotes":{"type":"string"},"ports":{"type":"object","additionalProperties":false,"required":["inputs","outputs"],"properties":{"inputs":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},"type":{"type":"string","pattern":"^[A-Z][A-Za-z0-9]*(<([A-Z][A-Za-z0-9]*)(,[A-Z][A-Za-z0-9]*)*>)?$"},"required":{"type":"boolean"}}}},"outputs":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},"type":{"type":"string","pattern":"^[A-Z][A-Za-z0-9]*(<([A-Z][A-Za-z0-9]*)(,[A-Z][A-Za-z0-9]*)*>)?$"},"required":{"type":"boolean"}}}}}},"workbenchNode":{"type":"object","minProperties":1,"additionalProperties":true}}}}}}`
+	return `{"type":"object","additionalProperties":false,"required":["candidates"],"properties":{"apiVersion":{"type":"string"},"kind":{"type":"string","enum":["CandidateReport"]},"metadata":{"type":"object","additionalProperties":false,"properties":{"sessionId":{"type":"string"},"repoName":{"type":"string"}}},"candidates":{"type":"array","minItems":1,"maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["proposedName","description","moduleKind","targetLanguage","confidence","extractionRisk","sourcePaths","reusableRationale","couplingNotes","dependencies","sideEffects","testsFound","missingTests","ports","workbenchNode"],"properties":{"id":{"type":"string","minLength":1},"repo":{"type":"string","minLength":1},"sessionId":{"type":"string","minLength":1},"proposedName":{"type":"string","minLength":1},"description":{"type":"string","minLength":1},"moduleKind":{"type":"string","minLength":1},"targetLanguage":{"type":"string","minLength":1},"confidence":{"type":"string","enum":["low","medium","high"]},"extractionRisk":{"type":"string","enum":["low","medium","high"]},"recommendedAction":{"type":"string","enum":["approve","defer","reject","rescan"]},"sourcePaths":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"reusableRationale":{"type":"string","minLength":1},"couplingNotes":{"type":"string","minLength":1},"dependencies":{"type":"array","items":{"type":"string"}},"sideEffects":{"type":"array","items":{"type":"string"}},"testsFound":{"type":"array","items":{"type":"string"}},"missingTests":{"type":"array","items":{"type":"string"}},"risks":{"type":"array","items":{"type":"string"}},"extractionNotes":{"type":"string"},"ports":{"type":"object","additionalProperties":false,"required":["inputs","outputs"],"properties":{"inputs":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},"type":{"type":"string","pattern":"^[A-Z][A-Za-z0-9]*(<([A-Z][A-Za-z0-9]*)(,[A-Z][A-Za-z0-9]*)*>)?$"},"required":{"type":"boolean"}}}},"outputs":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},"type":{"type":"string","pattern":"^[A-Z][A-Za-z0-9]*(<([A-Z][A-Za-z0-9]*)(,[A-Z][A-Za-z0-9]*)*>)?$"},"required":{"type":"boolean"}}}}}},"workbenchNode":{"type":"object","minProperties":1,"additionalProperties":true}}}}}}`
 }
 
 func materializeStructuredOutputTools(readRoot, role string) error {
@@ -1150,6 +1199,9 @@ func candidateReportFromTranscript(content string) ([]byte, error) {
 	if report, ok := normalizeCandidateReportJSON([]byte(cleaned)); ok {
 		return report, nil
 	}
+	if report, ok := candidateReportFromJSONLines(cleaned); ok {
+		return report, nil
+	}
 	if fenced := stripJSONFence(cleaned); fenced != cleaned {
 		if report, ok := normalizeCandidateReportJSON([]byte(fenced)); ok {
 			return report, nil
@@ -1163,11 +1215,81 @@ func candidateReportFromTranscript(content string) ([]byte, error) {
 	return nil, errors.New("candidate report JSON is invalid")
 }
 
+func candidateReportFromJSONLines(content string) ([]byte, bool) {
+	lines := strings.Split(content, "\n")
+	structuredParts := map[int]*strings.Builder{}
+	structuredActive := map[int]bool{}
+	var structuredCandidates [][]byte
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if report, ok := normalizeCandidateReportJSONFromValue(event); ok {
+			structuredCandidates = append(structuredCandidates, report)
+		}
+		streamEvent, ok := event["event"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if blockStart, ok := streamEvent["content_block"].(map[string]any); ok && asString(blockStart["name"]) == "StructuredOutput" {
+			index := asJSONIndex(streamEvent["index"])
+			structuredActive[index] = true
+			structuredParts[index] = &strings.Builder{}
+			if input, ok := blockStart["input"].(map[string]any); ok {
+				if report, ok := normalizeCandidateReportJSONFromValue(input); ok {
+					structuredCandidates = append(structuredCandidates, report)
+				}
+			}
+		}
+		delta, ok := streamEvent["delta"].(map[string]any)
+		if !ok {
+			continue
+		}
+		index := asJSONIndex(streamEvent["index"])
+		if !structuredActive[index] || asString(delta["type"]) != "input_json_delta" {
+			continue
+		}
+		part := asString(delta["partial_json"])
+		if part == "" {
+			continue
+		}
+		if structuredParts[index] == nil {
+			structuredParts[index] = &strings.Builder{}
+		}
+		structuredParts[index].WriteString(part)
+		if report, ok := normalizeCandidateReportJSON([]byte(structuredParts[index].String())); ok {
+			structuredCandidates = append(structuredCandidates, report)
+		}
+	}
+	if len(structuredCandidates) > 0 {
+		return structuredCandidates[len(structuredCandidates)-1], true
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		if report, ok := normalizeCandidateReportJSON([]byte(line)); ok {
+			return report, true
+		}
+	}
+	return nil, false
+}
+
 func normalizeCandidateReportJSON(b []byte) ([]byte, bool) {
 	var v any
 	if err := json.Unmarshal(b, &v); err != nil {
 		return nil, false
 	}
+	return normalizeCandidateReportJSONFromValue(v)
+}
+
+func normalizeCandidateReportJSONFromValue(v any) ([]byte, bool) {
 	if hasCandidateReportShape(v) {
 		out, err := json.MarshalIndent(v, "", "  ")
 		return out, err == nil
@@ -1176,11 +1298,24 @@ func normalizeCandidateReportJSON(b []byte) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
+	for _, key := range []string{"message", "event"} {
+		if raw, ok := m[key].(map[string]any); ok {
+			if report, ok := normalizeCandidateReportJSONFromValue(raw); ok {
+				return report, true
+			}
+		}
+	}
 	for _, key := range []string{"result", "content", "text"} {
 		switch raw := m[key].(type) {
 		case string:
 			if out, ok := normalizeCandidateReportJSON([]byte(raw)); ok {
 				return out, true
+			}
+		case []any:
+			for _, item := range raw {
+				if report, ok := normalizeCandidateReportJSONFromValue(item); ok {
+					return report, true
+				}
 			}
 		case map[string]any:
 			out, err := json.Marshal(raw)
@@ -1190,6 +1325,14 @@ func normalizeCandidateReportJSON(b []byte) ([]byte, bool) {
 				}
 			}
 		}
+	}
+	if asString(m["type"]) == "tool_use" && asString(m["name"]) == "StructuredOutput" {
+		if input, ok := m["input"].(map[string]any); ok {
+			return normalizeCandidateReportJSONFromValue(input)
+		}
+	}
+	if input, ok := m["input"].(map[string]any); ok && hasCandidateReportShape(input) {
+		return normalizeCandidateReportJSONFromValue(input)
 	}
 	return nil, false
 }
@@ -1201,6 +1344,20 @@ func hasCandidateReportShape(v any) bool {
 	}
 	candidates, ok := m["candidates"].([]any)
 	return ok && len(candidates) > 0
+}
+
+func asJSONIndex(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
+	}
 }
 
 func stripJSONFence(s string) string {
@@ -1324,6 +1481,9 @@ func outputFiles(root string, limit int) ([]map[string]any, error) {
 		if err != nil {
 			rel = path
 		}
+		if skipOutputFile(rel) {
+			return nil
+		}
 		info, _ := d.Info()
 		size := int64(0)
 		if info != nil {
@@ -1337,4 +1497,9 @@ func outputFiles(root string, limit int) ([]map[string]any, error) {
 		files = files[:limit]
 	}
 	return files, err
+}
+
+func skipOutputFile(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	return strings.HasPrefix(rel, "tmp/node-compile-cache/") || strings.HasSuffix(rel, ".lock")
 }

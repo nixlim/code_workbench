@@ -1390,10 +1390,20 @@ func (a *App) handleGetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) inspectJob(job map[string]any) map[string]any {
+	jobID := asString(job["id"])
 	promptPath := asString(job["promptPath"])
 	transcriptPath := asString(job["transcriptPath"])
 	outputPath := asString(job["outputArtifactPath"])
 	metrics := map[string]any{}
+	if detail, err := a.Job(jobID); err == nil && detail.Status == "running" && detail.TmuxSessionName != "" {
+		if provider := a.providers[detail.Provider]; provider != nil {
+			if opened, err := provider.Open(context.Background(), detail); err == nil {
+				for key, value := range opened {
+					job[key] = value
+				}
+			}
+		}
+	}
 	if promptPath != "" {
 		if content, info, err := readTextArtifact(promptPath, 256*1024); err == nil {
 			job["prompt"] = map[string]any{"path": info.Path, "content": content, "bytes": info.Size, "truncated": info.Truncated}
@@ -1415,6 +1425,15 @@ func (a *App) inspectJob(job map[string]any) map[string]any {
 			metrics["outputFiles"] = len(files)
 		}
 	}
+	if activity, ok := a.claudeActivityLog(jobID); ok {
+		job["activityLog"] = activity
+		if bytes, ok := activity["bytes"].(int64); ok {
+			metrics["activityBytes"] = bytes
+		}
+		if lines, ok := activity["lineCount"].(int); ok {
+			metrics["activityLines"] = lines
+		}
+	}
 	if started := asString(job["startedAt"]); started != "" {
 		if start, err := time.Parse(time.RFC3339Nano, started); err == nil {
 			end := time.Now().UTC()
@@ -1430,12 +1449,109 @@ func (a *App) inspectJob(job map[string]any) map[string]any {
 	return job
 }
 
+func (a *App) claudeActivityLog(jobID string) (map[string]any, bool) {
+	if jobID == "" {
+		return nil, false
+	}
+	root := filepath.Join(a.cfg.DataDir, "jobs", jobID, "workspace", ".devlog")
+	summaryPath := filepath.Join(root, "log.jsonl")
+	bufferPath := filepath.Join(root, "buffer.jsonl")
+	summaryContent, summaryInfo, summaryErr := readTextArtifact(summaryPath, 128*1024)
+	bufferContent, bufferInfo, bufferErr := readTextArtifact(bufferPath, 64*1024)
+	if summaryErr != nil && bufferErr != nil {
+		return nil, false
+	}
+	content, events := formatClaudeActivity(summaryContent, bufferContent)
+	if strings.TrimSpace(content) == "" {
+		return nil, false
+	}
+	bytes := int64(0)
+	truncated := false
+	if summaryErr == nil {
+		bytes += summaryInfo.Size
+		truncated = truncated || summaryInfo.Truncated
+	}
+	if bufferErr == nil {
+		bytes += bufferInfo.Size
+		truncated = truncated || bufferInfo.Truncated
+	}
+	return map[string]any{
+		"path":      summaryPath,
+		"content":   content,
+		"bytes":     bytes,
+		"truncated": truncated,
+		"lineCount": strings.Count(content, "\n"),
+		"events":    events,
+	}, true
+}
+
+func formatClaudeActivity(summaryContent, bufferContent string) (string, []map[string]any) {
+	lines := []string{}
+	events := []map[string]any{}
+	for _, line := range strings.Split(summaryContent, "\n") {
+		entry := parseJSONLine(line)
+		if len(entry) == 0 {
+			continue
+		}
+		summary := asString(entry["summary"])
+		if summary == "" {
+			continue
+		}
+		text := fmt.Sprintf("#%s %s %s", displayJSONValue(entry["seq"]), compactTimestamp(asString(entry["ts"])), summary)
+		lines = append(lines, text)
+		events = append(events, map[string]any{"kind": "message", "line": len(lines), "text": text})
+	}
+	bufferLines := []string{}
+	for _, line := range strings.Split(bufferContent, "\n") {
+		entry := parseJSONLine(line)
+		if len(entry) == 0 {
+			continue
+		}
+		tool := asString(entry["tool"])
+		detail := asString(entry["detail"])
+		if tool == "" && detail == "" {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprintf("#%s %s %s %s", displayJSONValue(entry["seq"]), compactTimestamp(asString(entry["ts"])), tool, detail))
+		bufferLines = append(bufferLines, text)
+	}
+	if len(bufferLines) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, "Recent tool activity")
+		start := 0
+		if len(bufferLines) > 20 {
+			start = len(bufferLines) - 20
+		}
+		for _, text := range bufferLines[start:] {
+			lines = append(lines, text)
+			events = append(events, map[string]any{"kind": "tool", "line": len(lines), "text": text})
+		}
+	}
+	return strings.Join(lines, "\n"), events
+}
+
+func parseJSONLine(line string) map[string]any {
+	line = strings.TrimSpace(line)
+	if line == "" || !strings.HasPrefix(line, "{") {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(line), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
 func classifyAgentTranscript(content string) []map[string]any {
 	lines := strings.Split(content, "\n")
 	events := []map[string]any{}
 	for i, line := range lines {
 		text := strings.TrimSpace(stripANSI(line))
 		if text == "" {
+			continue
+		}
+		if event := classifyClaudeStreamEvent(text, i+1); event != nil {
+			events = append(events, event)
 			continue
 		}
 		kind := ""
@@ -1457,6 +1573,97 @@ func classifyAgentTranscript(content string) []map[string]any {
 		}
 	}
 	return events
+}
+
+func classifyClaudeStreamEvent(line string, lineNumber int) map[string]any {
+	entry := parseJSONLine(line)
+	if len(entry) == 0 {
+		return nil
+	}
+	kind := "message"
+	text := ""
+	switch asString(entry["type"]) {
+	case "assistant":
+		kind, text = classifyClaudeAssistantMessage(entry)
+	case "user":
+		text = "user/tool result"
+	case "system":
+		text = "system " + asString(entry["subtype"])
+	case "result":
+		if asString(entry["subtype"]) != "" {
+			text = "result " + asString(entry["subtype"])
+		}
+		if duration := displayJSONValue(entry["duration_ms"]); duration != "" {
+			kind = "metric"
+			text = strings.TrimSpace(text + " duration_ms=" + duration)
+		}
+		if result := asString(entry["result"]); result != "" {
+			text = strings.TrimSpace(text + " " + result)
+		}
+	case "error":
+		kind = "error"
+		text = asString(entry["message"])
+	case "hook":
+		kind = "tool"
+		text = "hook " + asString(entry["hook_event_name"])
+	default:
+		text = asString(entry["type"])
+	}
+	text = truncateEventText(strings.TrimSpace(text))
+	if text == "" {
+		return nil
+	}
+	return map[string]any{"kind": kind, "line": lineNumber, "text": text}
+}
+
+func classifyClaudeAssistantMessage(entry map[string]any) (string, string) {
+	message, _ := entry["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	for _, raw := range content {
+		part, _ := raw.(map[string]any)
+		switch asString(part["type"]) {
+		case "tool_use":
+			return "tool", "tool " + asString(part["name"]) + " " + displayJSONValue(part["input"])
+		case "text":
+			return "message", asString(part["text"])
+		}
+	}
+	return "message", "assistant message"
+}
+
+func truncateEventText(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) <= 240 {
+		return text
+	}
+	return text[:240] + "..."
+}
+
+func compactTimestamp(ts string) string {
+	if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+		return parsed.UTC().Format("15:04:05")
+	}
+	return ts
+}
+
+func displayJSONValue(v any) string {
+	switch value := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return value
+	case float64:
+		if value == float64(int64(value)) {
+			return strconv.FormatInt(int64(value), 10)
+		}
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	default:
+		b, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Sprint(value)
+		}
+		return string(b)
+	}
 }
 
 func stripANSI(s string) string {

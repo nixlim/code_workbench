@@ -657,6 +657,105 @@ func TestCandidateReportCanBeReadFromClaudeJSONEnvelope(t *testing.T) {
 	}
 }
 
+func TestCandidateReportCanBeReadFromClaudeStreamJSONTranscript(t *testing.T) {
+	report := `{"candidates":[{"proposedName":"streamed-config-loader","description":"Loads config.","moduleKind":"library","targetLanguage":"go","confidence":"medium","extractionRisk":"low","sourcePaths":["internal/config"],"reusableRationale":"Config loading is reusable.","couplingNotes":"Minimal coupling.","dependencies":[],"sideEffects":[],"testsFound":[],"missingTests":[],"ports":{"inputs":[{"name":"config_path","type":"ConfigPath"}],"outputs":[{"name":"config","type":"Config"}]},"workbenchNode":{"type":"configLoader"}}]}`
+	result, err := json.Marshal(map[string]any{"type": "result", "subtype": "success", "duration_ms": 1234, "result": report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript := strings.Join([]string{
+		`{"type":"system","subtype":"init"}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"rg config"}}]}}`,
+		string(result),
+	}, "\n")
+	got, err := candidateReportFromTranscript(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "streamed-config-loader") {
+		t.Fatalf("unexpected report: %s", got)
+	}
+}
+
+func TestCandidateReportCanBeReadFromClaudeStructuredOutputStream(t *testing.T) {
+	report := `{"candidates":[{"proposedName":"structured-config-loader","description":"Loads config.","moduleKind":"library","targetLanguage":"go","confidence":"medium","extractionRisk":"low","sourcePaths":["internal/config"],"reusableRationale":"Config loading is reusable.","couplingNotes":"Minimal coupling.","dependencies":[],"sideEffects":[],"testsFound":[],"missingTests":[],"ports":{"inputs":[{"name":"config_path","type":"ConfigPath"}],"outputs":[{"name":"config","type":"Config"}]},"workbenchNode":{"type":"configLoader"}}]}`
+	assistantLine, err := json.Marshal(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"content": []any{
+				map[string]any{
+					"type":  "tool_use",
+					"name":  "StructuredOutput",
+					"input": json.RawMessage(report),
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamStart := `{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"StructuredOutput","input":{}}}}`
+	streamPart1 := `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"candidates\":[{\"proposedName\":\"structured-config-loader\",\"description\":\"Loads config.\",\"moduleKind\":\"library\",\"targetLanguage\":\"go\",\"confidence\":\"medium\",\"extractionRisk\":\"low\",\"sourcePaths\":[\"internal/config\"],\"reusableRationale\":\"Config loading is reusable.\",\"couplingNotes\":\"Minimal coupling.\",\"dependencies\":[],\"sideEffects\":[],\"testsFound\":[],\"missingTests\":[],\"ports\":{\"inputs\":[{\"name\":\"config_path\",\"type\":\"ConfigPath\"}],"}}}`
+	streamPart2 := `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"outputs\":[{\"name\":\"config\",\"type\":\"Config\"}]},\"workbenchNode\":{\"type\":\"configLoader\"}}]}"}}}`
+	transcript := strings.Join([]string{streamStart, streamPart1, streamPart2, string(assistantLine)}, "\n")
+	got, err := candidateReportFromTranscript(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "structured-config-loader") {
+		t.Fatalf("unexpected report: %s", got)
+	}
+}
+
+func TestInspectJobIncludesAttachCommandAndClaudeActivity(t *testing.T) {
+	app, _ := newTestApp(t)
+	root := filepath.Join(app.cfg.DataDir, "jobs", "activity_job")
+	output := filepath.Join(root, "output")
+	devlog := filepath.Join(root, "workspace", ".devlog")
+	if err := os.MkdirAll(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(devlog, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prompt := filepath.Join(root, "prompt.md")
+	transcript := filepath.Join(output, "transcript.txt")
+	if err := os.WriteFile(prompt, []byte("analyze repo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	streamLine := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"rg telemetry"}}]}}`
+	if err := os.WriteFile(transcript, []byte(streamLine+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devlog, "log.jsonl"), []byte(`{"seq":1,"ts":"2026-05-13T01:07:47Z","summary":"The analysis maps repository structure for reusable modules.","model":"claude-haiku","duration_ms":1000}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devlog, "buffer.jsonl"), []byte(`{"seq":2,"ts":"2026-05-13T01:07:48Z","tool":"Bash","detail":"rg telemetry","changed":false}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ts := now()
+	_, err := app.store.DB.Exec(`INSERT INTO agent_jobs(id,role,provider,status,subject_type,subject_id,tmux_session_name,prompt_path,transcript_path,output_artifact_path,timeout_seconds,created_at,started_at) VALUES('activity_job','repo_analysis','fake','running','session','sess','activity-session',?,?,?,1800,?,?)`, prompt, transcript, output, ts, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, inspected := doJSON(t, app, http.MethodGet, "/api/agent-jobs/activity_job", nil)
+	if code != 200 {
+		t.Fatalf("inspect status=%d body=%v", code, inspected)
+	}
+	if attach := inspected["attachCommand"].(string); !strings.Contains(attach, "activity-session") {
+		t.Fatalf("missing attach command: %v", inspected)
+	}
+	activity := inspected["activityLog"].(map[string]any)
+	if !strings.Contains(activity["content"].(string), "repository structure") {
+		t.Fatalf("missing devlog activity: %v", activity)
+	}
+	transcriptArtifact := inspected["transcript"].(map[string]any)
+	events := transcriptArtifact["events"].([]any)
+	if len(events) == 0 {
+		t.Fatalf("stream-json transcript did not produce events: %v", transcriptArtifact)
+	}
+}
+
 func TestClaimQueuedJobIsAtomic(t *testing.T) {
 	app, _ := newTestApp(t)
 	ts := now()

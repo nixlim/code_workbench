@@ -1,6 +1,6 @@
 import ReactFlow, { Background, Controls, Handle, Position, addEdge, useEdgesState, useNodesState, type Connection, type NodeProps } from 'reactflow';
 import { Boxes, FileText, GitBranch, PlaySquare, Plus, RefreshCw, Trash2, WandSparkles } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { AgentJob, Candidate, Composition, ModuleRecord, Repository, Session, SessionCleanupResult, SpecEnrichment } from '../api/generated/types';
 import { APIRequestError, api } from '../api/client';
@@ -18,8 +18,15 @@ const screens: Array<{ id: Screen; label: string; icon: React.ComponentType<{ si
 ];
 
 export function App() {
-  const [screen, setScreen] = useState<Screen>('registry');
+  const [screen, setScreenState] = useState<Screen>(() => {
+    const saved = window.localStorage.getItem('code-workbench:screen');
+    return screens.some((item) => item.id === saved) ? saved as Screen : 'registry';
+  });
   const [error, setError] = useState('');
+  const setScreen = (value: Screen) => {
+    setScreenState(value);
+    window.localStorage.setItem('code-workbench:screen', value);
+  };
 
   return (
     <div className="shell">
@@ -476,9 +483,48 @@ function Jobs({ onError }: { onError: (value: string) => void }) {
   const [items, setItems] = useState<AgentJob[]>([]);
   const [inspected, setInspected] = useState<AgentJob | null>(null);
   const [attachCommand, setAttachCommand] = useState('');
-  const load = () => api.list<AgentJob>('/api/agent-jobs').then((r) => setItems(r.items)).catch((e) => onError(e.message));
-  const inspect = (job: AgentJob) => api.get<AgentJob>(`/api/agent-jobs/${job.id}`).then(setInspected).catch((e) => onError(e.message));
-  useEffect(() => { load(); }, []);
+  const [selectedJobId, setSelectedJobId] = useState(() => window.localStorage.getItem('code-workbench:selected-agent-job') ?? '');
+  const load = useCallback(() => api.list<AgentJob>('/api/agent-jobs').then((r) => setItems(r.items)).catch((e) => onError(e.message)), [onError]);
+  const clearSelectedJob = useCallback(() => {
+    setInspected(null);
+    setAttachCommand('');
+    setSelectedJobId('');
+    window.localStorage.removeItem('code-workbench:selected-agent-job');
+  }, []);
+  const inspectById = useCallback((id: string) => api.get<AgentJob>(`/api/agent-jobs/${id}`).then((job) => {
+    setInspected(job);
+    setSelectedJobId(job.id);
+    window.localStorage.setItem('code-workbench:selected-agent-job', job.id);
+    if (job.attachCommand) {
+      setAttachCommand(job.attachCommand);
+    }
+  }).catch((e) => {
+    if (e instanceof APIRequestError && e.code === 'resource.not_found') {
+      clearSelectedJob();
+      return;
+    }
+    onError(e.message);
+  }), [clearSelectedJob, onError]);
+  const inspect = (job: AgentJob) => inspectById(job.id);
+  const openJob = (job: AgentJob) => api.post<{ attachCommand: string }>(`/api/agent-jobs/${job.id}/open`).then((opened) => {
+    setAttachCommand(opened.attachCommand);
+    return api.get<AgentJob>(`/api/agent-jobs/${job.id}`).then((detail) => setInspected({ ...detail, ...opened }));
+  }).catch((e) => onError(e.message));
+  useEffect(() => {
+    void load();
+    if (selectedJobId) {
+      void inspectById(selectedJobId);
+    }
+  }, [inspectById, load, selectedJobId]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void load();
+      if (selectedJobId) {
+        void inspectById(selectedJobId);
+      }
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [inspectById, load, selectedJobId]);
   return (
     <section>
       <Header title="Agent Jobs" />
@@ -494,7 +540,7 @@ function Jobs({ onError }: { onError: (value: string) => void }) {
             <span>{j.status}</span>
             <span>{j.id}</span>
             <button onClick={() => inspect(j)}>Inspect</button>
-            <button onClick={() => api.post<{ attachCommand: string }>(`/api/agent-jobs/${j.id}/open`).then((r) => setAttachCommand(r.attachCommand)).catch((e) => onError(e.message))}>Open</button>
+            <button onClick={() => openJob(j)}>Open</button>
             <button onClick={() => api.post(`/api/agent-jobs/${j.id}/cancel`).then(load).catch((e) => onError(e.message))}>Cancel</button>
           </article>
         ))}
@@ -505,12 +551,19 @@ function Jobs({ onError }: { onError: (value: string) => void }) {
 }
 
 function JobInspector({ job }: { job: AgentJob }) {
-  const events = job.transcript?.events ?? [];
+  const events = [...(job.transcript?.events ?? []), ...(job.activityLog?.events ?? [])];
   const files = job.outputFiles ?? [];
   const hasFailureDetail = job.errorCode || job.exitCode !== undefined;
   return (
     <section className="panel job-inspector">
       <h3>{job.role} {job.status}</h3>
+      {(job.attachCommand || job.tmuxSessionName) && (
+        <section className="job-session-panel">
+          <h4>Live session</h4>
+          {job.tmuxSessionName && <div className="path-line">{job.tmuxSessionName}</div>}
+          {job.attachCommand && <CommandBlock value={job.attachCommand} />}
+        </section>
+      )}
       {hasFailureDetail && (
         <div className="job-status-detail">
           {job.errorCode && <span><strong>errorCode</strong>{job.errorCode}</span>}
@@ -524,12 +577,13 @@ function JobInspector({ job }: { job: AgentJob }) {
       <div className="job-detail-grid">
         <LogBlock title="Prompt" path={job.prompt?.path ?? job.promptPath} content={job.prompt?.content ?? ''} truncated={job.prompt?.truncated} />
         <LogBlock title="Transcript" path={job.transcript?.path ?? job.transcriptPath} content={job.transcript?.content ?? ''} truncated={job.transcript?.truncated} />
+        {job.activityLog && <LogBlock title="Live activity" path={job.activityLog.path} content={job.activityLog.content} truncated={job.activityLog.truncated} />}
       </div>
       <div className="job-detail-grid">
         <section>
           <h4>Detected messages and prompts</h4>
           <div className="event-list">
-            {events.map((event) => <span key={`${event.kind}-${event.line}`}><strong>{event.kind}</strong><em>line {event.line}</em>{event.text}</span>)}
+            {events.map((event, index) => <span key={`${event.kind}-${event.line}-${index}`}><strong>{event.kind}</strong><em>line {event.line}</em>{event.text}</span>)}
             {events.length === 0 && <span>No prompt, tool, metric, or error markers detected yet.</span>}
           </div>
         </section>
@@ -542,6 +596,20 @@ function JobInspector({ job }: { job: AgentJob }) {
         </section>
       </div>
     </section>
+  );
+}
+
+function CommandBlock({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => navigator.clipboard.writeText(value).then(() => {
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }).catch(() => setCopied(false));
+  return (
+    <div className="command-block">
+      <code>{value}</code>
+      <button onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+    </div>
   );
 }
 
