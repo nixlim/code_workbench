@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,12 +31,15 @@ func main() {
 	defer app.Close()
 	go app.RunScheduler(ctx)
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	srv := &http.Server{Addr: addr, Handler: app.Handler()}
+	ln, addr, err := listen(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv := &http.Server{Handler: app.Handler()}
 	errc := make(chan error, 1)
 	go func() {
 		log.Printf("code-workbench listening on http://%s", addr)
-		errc <- srv.ListenAndServe()
+		errc <- srv.Serve(ln)
 	}()
 
 	stop := make(chan os.Signal, 1)
@@ -51,6 +56,28 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+}
+
+func listen(cfg config.Config) (net.Listener, string, error) {
+	attempts := 1
+	if cfg.Dev && cfg.Port > 0 {
+		attempts = 100
+	}
+	for i := 0; i < attempts; i++ {
+		port := cfg.Port
+		if cfg.Port > 0 {
+			port += i
+		}
+		addr := fmt.Sprintf("%s:%d", cfg.Host, port)
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			return ln, ln.Addr().String(), nil
+		}
+		if !cfg.Dev || !errors.Is(err, syscall.EADDRINUSE) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("no available backend port starting at %d", cfg.Port)
 }
 
 func init() {

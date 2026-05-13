@@ -132,8 +132,14 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(promptBytes), "Prioritize reusable candidates") || !strings.Contains(string(promptBytes), "config") {
+	if !strings.Contains(string(promptBytes), "repo-by-repo modularisation workflow") || !strings.Contains(string(promptBytes), "Prioritise reusable candidates") || !strings.Contains(string(promptBytes), "outvalid") || !strings.Contains(string(promptBytes), "config") {
 		t.Fatalf("prompt did not include user intent:\n%s", string(promptBytes))
+	}
+	if _, err := os.Stat(filepath.Join(app.cfg.DataDir, "jobs", jobID, "workspace", "read", "candidate-report.schema.json")); err != nil {
+		t.Fatalf("candidate report schema was not materialized: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(app.cfg.DataDir, "jobs", jobID, "workspace", "read", "outvalid")); err != nil {
+		t.Fatalf("outvalid was not materialized: %v", err)
 	}
 	code, session = doJSON(t, app, http.MethodGet, "/api/sessions/"+sessionID, nil)
 	if code != 200 || session["phase"] != "analysing" {
@@ -546,6 +552,36 @@ func TestClaudeAuthEnvIsForwardedToJobEnvironment(t *testing.T) {
 	}
 }
 
+func TestFilteredEnvUsesExplicitHomeOverride(t *testing.T) {
+	env := filteredEnv("/tmp/job-home", map[string]string{"HOME": "/tmp/real-home", "CODE_WORKBENCH_JOB_ID": "job_1"})
+	if !containsEnv(env, "HOME=/tmp/real-home") {
+		t.Fatalf("HOME override was not forwarded: %v", env)
+	}
+	if containsEnv(env, "HOME=/tmp/job-home") {
+		t.Fatalf("isolated HOME should be replaced when an explicit HOME override is supplied: %v", env)
+	}
+}
+
+func TestFilteredEnvCanSuppressAPIKeyAuthForClaudeLogin(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "invalid-key")
+	t.Setenv("USER", "nixlim")
+	t.Setenv("LOGNAME", "nixlim")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/ssh.sock")
+	t.Setenv("__CF_USER_TEXT_ENCODING", "0x1F5:0x0:0x2")
+	env := filteredEnvForClaude("/tmp/job-home", map[string]string{"HOME": "/tmp/real-home"}, false)
+	if containsEnv(env, "ANTHROPIC_API_KEY=invalid-key") {
+		t.Fatalf("API key auth should not be forwarded when using Claude login: %v", env)
+	}
+	if !containsEnv(env, "HOME=/tmp/real-home") {
+		t.Fatalf("HOME override was not forwarded: %v", env)
+	}
+	for _, want := range []string{"USER=nixlim", "LOGNAME=nixlim", "SSH_AUTH_SOCK=/tmp/ssh.sock", "__CF_USER_TEXT_ENCODING=0x1F5:0x0:0x2"} {
+		if !containsEnv(env, want) {
+			t.Fatalf("Claude login support env %s was not forwarded: %v", want, env)
+		}
+	}
+}
+
 func TestClaudeUserConfigDirRequiresCredentials(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
@@ -558,6 +594,93 @@ func TestClaudeUserConfigDirRequiresCredentials(t *testing.T) {
 	}
 	if got := claudeUserConfigDir(); got != dir {
 		t.Fatalf("config dir=%s want %s", got, dir)
+	}
+}
+
+func TestRepoAnalysisStructuredOutputSchemaIsAvailable(t *testing.T) {
+	schema := jsonSchemaForRole("repo_analysis")
+	if !strings.Contains(schema, `"candidates"`) || !strings.Contains(schema, `"ports"`) {
+		t.Fatalf("repo_analysis schema missing candidate report contract: %s", schema)
+	}
+	if schema := jsonSchemaForRole("wiring"); schema != "" {
+		t.Fatalf("unexpected schema for wiring role: %s", schema)
+	}
+}
+
+func TestCandidateReportCanBeMaterializedFromTranscript(t *testing.T) {
+	app, repoPath := newTestApp(t)
+	_, repo := doJSON(t, app, http.MethodPost, "/api/repositories", map[string]any{"sourceType": "local_path", "sourceUri": repoPath})
+	_, session := doJSON(t, app, http.MethodPost, "/api/sessions", map[string]any{"repositoryId": repo["id"]})
+	sessionID := session["id"].(string)
+	root := filepath.Join(app.cfg.DataDir, "jobs", "transcript_report")
+	output := filepath.Join(root, "output")
+	if err := os.MkdirAll(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(output, "transcript.txt")
+	report := `{"candidates":[{"proposedName":"otel-agent-metrics","description":"Converts agent lifecycle events into OpenTelemetry metrics.","moduleKind":"library","targetLanguage":"go","confidence":"high","extractionRisk":"low","sourcePaths":["internal/telemetry"],"reusableRationale":"The metrics boundary is reusable across agent runtimes.","couplingNotes":"Uses internal event names that need normalization.","dependencies":["go.opentelemetry.io/otel"],"sideEffects":[],"testsFound":["internal/telemetry/metrics_test.go"],"missingTests":[],"ports":{"inputs":[{"name":"events","type":"AgentLifecycleEventStream","required":true}],"outputs":[{"name":"metrics","type":"OTelMetricStream"}]},"workbenchNode":{"type":"otelMetrics"}}]}`
+	if err := os.WriteFile(transcript, []byte(report), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ts := now()
+	_, err := app.store.DB.Exec(`INSERT INTO agent_jobs(id,role,provider,status,subject_type,subject_id,prompt_path,transcript_path,output_artifact_path,timeout_seconds,created_at,started_at) VALUES('transcript_report','repo_analysis','fake','running','session',?,'prompt',?,?,1800,?,?)`, sessionID, transcript, output, ts, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.CompleteJob(context.Background(), "transcript_report", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := app.store.DB.QueryRow(`SELECT status FROM agent_jobs WHERE id='transcript_report'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("status=%s", status)
+	}
+	if _, err := os.Stat(filepath.Join(root, "candidate-report.json")); err != nil {
+		t.Fatalf("candidate report was not materialized: %v", err)
+	}
+}
+
+func TestCandidateReportCanBeReadFromClaudeJSONEnvelope(t *testing.T) {
+	report := `{"candidates":[{"proposedName":"config-loader","description":"Loads config.","moduleKind":"library","targetLanguage":"go","confidence":"medium","extractionRisk":"low","sourcePaths":["internal/config"],"reusableRationale":"Config loading is reusable.","couplingNotes":"Minimal coupling.","dependencies":[],"sideEffects":[],"testsFound":[],"missingTests":[],"ports":{"inputs":[{"name":"config_path","type":"ConfigPath"}],"outputs":[{"name":"config","type":"Config"}]},"workbenchNode":{"type":"configLoader"}}]}`
+	envelope, err := json.Marshal(map[string]string{"result": report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := candidateReportFromTranscript(string(envelope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "config-loader") {
+		t.Fatalf("unexpected report: %s", got)
+	}
+}
+
+func TestClaimQueuedJobIsAtomic(t *testing.T) {
+	app, _ := newTestApp(t)
+	ts := now()
+	_, err := app.store.DB.Exec(`INSERT INTO agent_jobs(id,role,provider,status,subject_type,subject_id,prompt_path,timeout_seconds,created_at) VALUES('claim_job','repo_analysis','fake','queued','session','sess','prompt',1800,?)`, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := app.Job("claim_job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := app.claimQueuedJob(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatalf("first claim failed")
+	}
+	claimed, err = app.claimQueuedJob(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatalf("second claim should not succeed")
 	}
 }
 

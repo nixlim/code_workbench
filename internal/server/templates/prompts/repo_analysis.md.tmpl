@@ -3,12 +3,18 @@
 Job: {{.JobID}}
 Subject: {{.SubjectType}} {{.SubjectID}}
 
-Analyze the repository checkout at {{.WorkspaceReadRoot}}/repo. Discover reusable module candidates and emit a CandidateReport.
+You are analysing a single repository as part of a repo-by-repo modularisation workflow.
+
+Inspect the repository at {{.WorkspaceReadRoot}}/repo and propose reusable candidates.
+
+Do not analyse unrelated repositories unless explicitly instructed.
+Do not modify code during discovery.
+Return candidates for this repository only.
 
 {{if .SpecificFunctionality}}
 ## User intent
 
-Prioritize reusable candidates that support this requested functionality:
+Prioritise reusable candidates that support this requested functionality:
 {{.SpecificFunctionality}}
 
 {{if .AreasOfInterest}}Areas of interest:
@@ -19,15 +25,71 @@ Prioritize reusable candidates that support this requested functionality:
 {{range .AvoidPatterns}}- {{.}}
 {{end}}{{end}}{{if .PreferredTargetLanguage}}Preferred target language: {{.PreferredTargetLanguage}}
 {{end}}Allow additional agent discovery: {{.AllowAgentDiscovery}}
+{{else}}
+The user did not provide a narrower extraction target. Inspect the repository and propose reusable candidates yourself.
 {{end}}
+
+## Candidate requirements
+
+Each candidate must describe:
+- candidate ID, using the session namespace pattern {{.SubjectID}}.cand.NNN in reasoning even though the backend assigns persisted IDs
+- repository/session scope
+- source paths
+- functionality description
+- why it is reusable
+- project-specific coupling
+- suggested module kind
+- target language
+- dependencies
+- risks
+- tests found
+- missing tests
+- extraction notes
+- proposed typed ports
+- proposed workbench node shape
+
+Focus especially on:
+- OpenTelemetry metrics
+- traces and logs
+- agent lifecycle events
+- agent administration
+- orchestration
+- process supervision
+- workspace management
+- repository checkout
+- task queues
+- model/provider abstraction
+- deployment helpers
+- webhooks
+- audit logs
+- admin APIs
 
 ## Output contract
 
 {{.OutputContract}}
 
-Write the final CandidateReport to {{.JobRoot}}/candidate-report.json and supporting logs/artifacts under {{.OutputRoot}}.
+Emit only the CandidateReport JSON object. Do not wrap it in Markdown or prose.
+The backend captures stdout and writes {{.CandidateReportPath}} if needed.
+Write any supporting logs/artifacts under {{.OutputRoot}} only if they are necessary.
+
+{{if .StructuredOutputSchema}}
+Before emitting the final JSON, validate a draft with outvalid:
+
+```bash
+{{.OutvalidPath}} --schema {{.StructuredOutputSchemaPath}} --input /tmp/code-workbench-candidate-report-draft.json --writeTo {{.CandidateReportPath}}
+```
+
+If validation fails, read the numbered errors, fix the draft, and retry. Allow up to 3 validation attempts.
+After validation passes, emit the same validated CandidateReport JSON on stdout.
+
+The JSON object must match this JSON Schema:
+
+```json
+{{.StructuredOutputSchema}}
+```
+{{end}}
 
 ## Safety rules
 
 {{.DeniedPathRules}}
-Read only from {{.WorkspaceReadRoot}}. Write only under {{.OutputRoot}}.
+Read only from {{.WorkspaceReadRoot}}. Write only under {{.OutputRoot}} and {{.CandidateReportPath}}.

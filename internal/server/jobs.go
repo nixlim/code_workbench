@@ -132,7 +132,8 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: "claude executable not found"}
 	}
 	claudeConfigDir := claudeUserConfigDir()
-	if !claudeAuthConfigured(os.Environ()) && claudeConfigDir == "" {
+	useClaudeLogin := claudeConfigDir != ""
+	if !claudeAuthConfigured(os.Environ()) && !useClaudeLogin {
 		return ProviderStart{}, APIError{
 			Status:  502,
 			Code:    "agent_provider.auth_required",
@@ -149,6 +150,9 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 		"--allowedTools", "Read,Grep,Glob,Edit,Write,MultiEdit,Bash(git *),Bash(go test *),Bash(go list *)",
 		"--disallowedTools", "WebFetch,WebSearch",
 	}
+	if schema := jsonSchemaForRole(job.Role); schema != "" {
+		claudeArgs = append(claudeArgs, "--json-schema", schema)
+	}
 	command, err := sandboxedCommand(runtime.GOOS, profilePath, output, workspace, claudeBin, claudeArgs)
 	if err != nil {
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: err.Error()}
@@ -162,12 +166,11 @@ func (p *ClaudeProvider) Start(ctx context.Context, job Job) (ProviderStart, err
 		"TMPDIR":                      filepath.Join(output, "tmp"),
 	}
 	if claudeConfigDir != "" {
-		extraEnv["CLAUDE_CONFIG_DIR"] = claudeConfigDir
 		if realHome, err := os.UserHomeDir(); err == nil && realHome != "" {
 			extraEnv["HOME"] = realHome
 		}
 	}
-	env := filteredEnv(home, extraEnv)
+	env := filteredEnvForClaude(home, extraEnv, !useClaudeLogin)
 	if err := p.runner(ctx, tmuxName, socketPath, sessionCommand, env, workspace); err != nil {
 		return ProviderStart{}, APIError{Status: 502, Code: "agent_provider.start_failed", Message: err.Error()}
 	}
@@ -241,15 +244,28 @@ func shellQuote(s string) string {
 }
 
 func filteredEnv(home string, extra map[string]string) []string {
-	keep := map[string]bool{"PATH": true, "SHELL": true, "TERM": true}
+	return filteredEnvForClaude(home, extra, true)
+}
+
+func filteredEnvForClaude(home string, extra map[string]string, includeAuthEnv bool) []string {
+	keep := map[string]bool{
+		"PATH": true, "SHELL": true, "TERM": true,
+		"USER": true, "LOGNAME": true, "SSH_AUTH_SOCK": true, "__CF_USER_TEXT_ENCODING": true,
+	}
+	if overrideHome, ok := extra["HOME"]; ok && strings.TrimSpace(overrideHome) != "" {
+		home = overrideHome
+	}
 	out := []string{"HOME=" + home}
 	for _, kv := range os.Environ() {
 		name := strings.SplitN(kv, "=", 2)[0]
-		if keep[name] || claudeAuthEnvName(name) {
+		if name != "HOME" && (keep[name] || (includeAuthEnv && claudeAuthEnvName(name))) {
 			out = append(out, kv)
 		}
 	}
 	for k, v := range extra {
+		if k == "HOME" {
+			continue
+		}
 		out = append(out, k+"="+v)
 	}
 	return out
@@ -363,9 +379,18 @@ func (a *App) QueueJob(ctx context.Context, role, subjectType, subjectID, provid
 	promptData := map[string]any{
 		"JobID": id, "Role": role, "SubjectType": subjectType, "SubjectID": subjectID,
 		"JobRoot": root, "OutputRoot": outputRoot, "WorkspaceReadRoot": readRoot,
-		"DeniedPathRules": "Do not read or write outside the OutputRoot. Do not access the user home directory, .ssh, .config, or any path outside the job workspace.",
+		"CandidateReportPath": filepath.Join(root, "candidate-report.json"),
+		"DeniedPathRules":     "Do not read or write outside the OutputRoot. Do not access the user home directory, .ssh, .config, or any path outside the job workspace.",
+	}
+	if role == "repo_analysis" || role == "candidate_scan" {
+		promptData["DeniedPathRules"] = "Do not read or write outside the OutputRoot except for the CandidateReportPath. Do not access the user home directory, .ssh, .config, or any path outside the job workspace."
 	}
 	a.enrichPromptData(ctx, promptData, role, subjectType, subjectID)
+	if schema := jsonSchemaForRole(role); schema != "" {
+		promptData["StructuredOutputSchema"] = schema
+		promptData["StructuredOutputSchemaPath"] = filepath.Join(readRoot, schemaFilenameForRole(role))
+		promptData["OutvalidPath"] = filepath.Join(readRoot, "outvalid")
+	}
 	if err := renderPrompt(promptPath, role, promptData); err != nil {
 		return 0, nil, err
 	}
@@ -395,7 +420,7 @@ func (a *App) outputRootForJob(role, subjectType, subjectID, jobID string) strin
 func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, subjectType, subjectID string) {
 	switch {
 	case role == "repo_analysis", role == "candidate_scan":
-		data["OutputContract"] = "Emit candidate-report.json with the CandidateReport schema: {candidates: [{proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, sourcePaths, reusableRationale, couplingNotes, dependencies, sideEffects, testsFound, missingTests, ports: {inputs, outputs}, workbenchNode}]}."
+		data["OutputContract"] = "Emit exactly one CandidateReport JSON object. The backend will store it as candidate-report.json. The object must contain candidates with proposedName, description, moduleKind, targetLanguage, confidence, extractionRisk, sourcePaths, reusableRationale, couplingNotes, dependencies, sideEffects, testsFound, missingTests, ports.inputs, ports.outputs, and workbenchNode."
 		if subjectType == "session" {
 			a.addSessionIntentToPrompt(ctx, data, subjectID)
 		}
@@ -465,7 +490,13 @@ func (a *App) materializeReadRoots(ctx context.Context, role, subjectType, subje
 		if err := a.store.DB.QueryRowContext(ctx, `SELECT checkout_path FROM repo_sessions WHERE id=?`, subjectID).Scan(&checkout); err != nil {
 			return err
 		}
-		return copyDir(checkout, filepath.Join(readRoot, "repo"))
+		if err := copyDir(checkout, filepath.Join(readRoot, "repo")); err != nil {
+			return err
+		}
+		if role == "repo_analysis" || role == "candidate_scan" {
+			return materializeStructuredOutputTools(readRoot, role)
+		}
+		return nil
 	case (role == "extraction" || role == "module_extraction" || role == "registry_update") && subjectType == "extraction_plan":
 		return a.materializeExtractionReadRoot(ctx, subjectID, readRoot)
 	case role == "spec_enrichment" && subjectType == "spec_enrichment":
@@ -757,22 +788,45 @@ func (a *App) tryStartQueued(ctx context.Context) {
 		if provider == nil {
 			continue
 		}
+		claimed, err := a.claimQueuedJob(ctx, job)
+		if err != nil {
+			return
+		}
+		if !claimed {
+			continue
+		}
 		start, err := provider.Start(ctx, job)
 		if err != nil {
 			code := "agent_provider.start_failed"
+			message := err.Error()
 			if apiErr := (APIError{}); errors.As(err, &apiErr) && apiErr.Code != "" {
 				code = apiErr.Code
+				if apiErr.Message != "" {
+					message = apiErr.Message
+				}
 			}
 			_, _ = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='failed', error_code=?, finished_at=? WHERE id=?`, code, now(), job.ID)
 			if job.Role == "repo_analysis" && job.SubjectType == "session" {
 				_ = a.transitionSession(ctx, job.SubjectID, "", "failed_analysis")
 			}
-			a.log.Event("job_start_failed", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider, "errorCode": code, "error": err.Error()})
+			a.log.Event("job_start_failed", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider, "errorCode": code, "error": message})
 			continue
 		}
-		_, _ = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='running', tmux_session_name=?, transcript_path=?, output_artifact_path=?, started_at=?, last_heartbeat_at=? WHERE id=?`, start.TmuxSessionName, start.TranscriptPath, start.OutputPath, now(), now(), job.ID)
+		_, _ = a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET tmux_session_name=?, transcript_path=?, output_artifact_path=?, last_heartbeat_at=? WHERE id=?`, start.TmuxSessionName, start.TranscriptPath, start.OutputPath, now(), job.ID)
 		a.log.Event("job_started", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider, "tmuxSessionName": start.TmuxSessionName, "transcriptPath": start.TranscriptPath, "outputPath": start.OutputPath})
 	}
+}
+
+func (a *App) claimQueuedJob(ctx context.Context, job Job) (bool, error) {
+	result, err := a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='running', started_at=?, last_heartbeat_at=? WHERE id=? AND status='queued'`, now(), now(), job.ID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
 }
 
 func (a *App) ReconcileInterrupted(ctx context.Context) error {
@@ -948,6 +1002,12 @@ func (a *App) CompleteJob(ctx context.Context, id string, exitCode int, errorCod
 		}
 	}
 	if status == "succeeded" && job.Role == "repo_analysis" {
+		if err := a.ensureCandidateReportArtifact(job); err != nil {
+			status = "failed"
+			errorCode = "candidate_report.invalid"
+		}
+	}
+	if status == "succeeded" && job.Role == "repo_analysis" {
 		if err := a.importCandidateReport(ctx, job); err != nil {
 			status = "failed"
 			if apiErr := (APIError{}); errors.As(err, &apiErr) && apiErr.Code != "" {
@@ -981,6 +1041,217 @@ func (a *App) CompleteJob(ctx context.Context, id string, exitCode int, errorCod
 	}
 	a.log.Event("job_finished", map[string]any{"jobId": id, "status": status, "exitCode": exitCode, "errorCode": errorCode})
 	return nil
+}
+
+func jsonSchemaForRole(role string) string {
+	switch role {
+	case "repo_analysis", "candidate_scan":
+		return candidateReportJSONSchema()
+	default:
+		return ""
+	}
+}
+
+func schemaFilenameForRole(role string) string {
+	switch role {
+	case "repo_analysis", "candidate_scan":
+		return "candidate-report.schema.json"
+	default:
+		return "output.schema.json"
+	}
+}
+
+func candidateReportJSONSchema() string {
+	return `{"type":"object","additionalProperties":false,"required":["candidates"],"properties":{"apiVersion":{"type":"string"},"kind":{"type":"string","enum":["CandidateReport"]},"metadata":{"type":"object","additionalProperties":false,"properties":{"sessionId":{"type":"string"},"repoName":{"type":"string"}}},"candidates":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["proposedName","description","moduleKind","targetLanguage","confidence","extractionRisk","sourcePaths","reusableRationale","couplingNotes","dependencies","sideEffects","testsFound","missingTests","ports","workbenchNode"],"properties":{"id":{"type":"string","minLength":1},"repo":{"type":"string","minLength":1},"sessionId":{"type":"string","minLength":1},"proposedName":{"type":"string","minLength":1},"description":{"type":"string","minLength":1},"moduleKind":{"type":"string","minLength":1},"targetLanguage":{"type":"string","minLength":1},"confidence":{"type":"string","enum":["low","medium","high"]},"extractionRisk":{"type":"string","enum":["low","medium","high"]},"recommendedAction":{"type":"string","enum":["approve","defer","reject","rescan"]},"sourcePaths":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}},"reusableRationale":{"type":"string","minLength":1},"couplingNotes":{"type":"string","minLength":1},"dependencies":{"type":"array","items":{"type":"string"}},"sideEffects":{"type":"array","items":{"type":"string"}},"testsFound":{"type":"array","items":{"type":"string"}},"missingTests":{"type":"array","items":{"type":"string"}},"risks":{"type":"array","items":{"type":"string"}},"extractionNotes":{"type":"string"},"ports":{"type":"object","additionalProperties":false,"required":["inputs","outputs"],"properties":{"inputs":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},"type":{"type":"string","pattern":"^[A-Z][A-Za-z0-9]*(<([A-Z][A-Za-z0-9]*)(,[A-Z][A-Za-z0-9]*)*>)?$"},"required":{"type":"boolean"}}}},"outputs":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["name","type"],"properties":{"name":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},"type":{"type":"string","pattern":"^[A-Z][A-Za-z0-9]*(<([A-Z][A-Za-z0-9]*)(,[A-Z][A-Za-z0-9]*)*>)?$"},"required":{"type":"boolean"}}}}}},"workbenchNode":{"type":"object","minProperties":1,"additionalProperties":true}}}}}}`
+}
+
+func materializeStructuredOutputTools(readRoot, role string) error {
+	schema := jsonSchemaForRole(role)
+	if schema == "" {
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(readRoot, schemaFilenameForRole(role)), []byte(schema), 0o644); err != nil {
+		return err
+	}
+	outvalid, err := findOutvalidBinary()
+	if err != nil {
+		return err
+	}
+	return copyFile(outvalid, filepath.Join(readRoot, "outvalid"), 0o755)
+}
+
+func findOutvalidBinary() (string, error) {
+	if cwd, err := os.Getwd(); err == nil {
+		for dir := cwd; ; dir = filepath.Dir(dir) {
+			candidate := filepath.Join(dir, "bin", "outvalid")
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate, nil
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
+	}
+	if path, err := exec.LookPath("outvalid"); err == nil {
+		return path, nil
+	}
+	return "", APIError{Status: 502, Code: "agent_provider.start_failed", Message: "outvalid executable not found"}
+}
+
+func (a *App) ensureCandidateReportArtifact(job Job) error {
+	path := filepath.Join(a.cfg.DataDir, "jobs", job.ID, "candidate-report.json")
+	if b, err := os.ReadFile(path); err == nil && json.Valid(b) {
+		return validateCandidateReportWithOutvalid(path)
+	}
+	if job.TranscriptPath == "" {
+		return APIError{Status: 422, Code: "candidate_report.invalid", Message: "candidate report is missing"}
+	}
+	b, err := os.ReadFile(job.TranscriptPath)
+	if err != nil {
+		return APIError{Status: 422, Code: "candidate_report.invalid", Message: "candidate transcript is missing"}
+	}
+	report, err := candidateReportFromTranscript(string(b))
+	if err != nil {
+		return APIError{Status: 422, Code: "candidate_report.invalid", Message: err.Error()}
+	}
+	if err := os.WriteFile(path, report, 0o644); err != nil {
+		return err
+	}
+	return validateCandidateReportWithOutvalid(path)
+}
+
+func validateCandidateReportWithOutvalid(path string) error {
+	schemaPath := filepath.Join(filepath.Dir(path), "candidate-report.schema.json")
+	if err := os.WriteFile(schemaPath, []byte(candidateReportJSONSchema()), 0o644); err != nil {
+		return err
+	}
+	outvalid, err := findOutvalidBinary()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(outvalid, "--schema", schemaPath, "--input", path, "--writeTo", path)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return APIError{Status: 422, Code: "candidate_report.invalid", Message: "candidate report schema validation failed: " + message}
+	}
+	return nil
+}
+
+func candidateReportFromTranscript(content string) ([]byte, error) {
+	cleaned := strings.TrimSpace(stripANSI(content))
+	if cleaned == "" {
+		return nil, errors.New("candidate report is empty")
+	}
+	if report, ok := normalizeCandidateReportJSON([]byte(cleaned)); ok {
+		return report, nil
+	}
+	if fenced := stripJSONFence(cleaned); fenced != cleaned {
+		if report, ok := normalizeCandidateReportJSON([]byte(fenced)); ok {
+			return report, nil
+		}
+	}
+	if extracted := extractJSONObject(cleaned); extracted != "" {
+		if report, ok := normalizeCandidateReportJSON([]byte(extracted)); ok {
+			return report, nil
+		}
+	}
+	return nil, errors.New("candidate report JSON is invalid")
+}
+
+func normalizeCandidateReportJSON(b []byte) ([]byte, bool) {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, false
+	}
+	if hasCandidateReportShape(v) {
+		out, err := json.MarshalIndent(v, "", "  ")
+		return out, err == nil
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	for _, key := range []string{"result", "content", "text"} {
+		switch raw := m[key].(type) {
+		case string:
+			if out, ok := normalizeCandidateReportJSON([]byte(raw)); ok {
+				return out, true
+			}
+		case map[string]any:
+			out, err := json.Marshal(raw)
+			if err == nil {
+				if report, ok := normalizeCandidateReportJSON(out); ok {
+					return report, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+func hasCandidateReportShape(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	candidates, ok := m["candidates"].([]any)
+	return ok && len(candidates) > 0
+}
+
+func stripJSONFence(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") || !strings.HasSuffix(s, "```") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) < 3 {
+		return s
+	}
+	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+}
+
+func extractJSONObject(s string) string {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(s[start : i+1])
+			}
+		}
+	}
+	return ""
 }
 
 func readExitCode(outputPath string) (int, error) {

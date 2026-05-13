@@ -71,7 +71,7 @@ _Add your project-specific conventions here_
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **code_workbench** (85115 symbols, 172015 relationships, 300 execution flows). Use GitNexus to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **code_workbench** (154890 symbols, 313099 relationships, 300 execution flows). Use GitNexus to understand code, assess impact, and navigate safely.
 
 ## ⚠️ CRITICAL: Use the CLI, not MCP tools
 
