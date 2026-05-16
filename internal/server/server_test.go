@@ -173,9 +173,25 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 		t.Fatalf("plan status=%d body=%v", code, plan)
 	}
 	planID := plan["id"].(string)
+	code, session = doJSON(t, app, http.MethodGet, "/api/sessions/"+sessionID, nil)
+	if code != 200 || session["phase"] != "extraction_planned" {
+		t.Fatalf("plan creation did not enter extraction_planned phase status=%d body=%v", code, session)
+	}
 	code, extractionJob := doJSON(t, app, http.MethodPost, "/api/extraction-plans/"+planID+"/jobs", map[string]any{"provider": "fake"})
 	if code != 202 {
 		t.Fatalf("extraction job status=%d body=%v", code, extractionJob)
+	}
+	code, session = doJSON(t, app, http.MethodGet, "/api/sessions/"+sessionID, nil)
+	if code != 200 || session["phase"] != "extracting" {
+		t.Fatalf("extraction job did not enter extracting phase status=%d body=%v", code, session)
+	}
+	code, plan = doJSON(t, app, http.MethodGet, "/api/extraction-plans/"+planID, nil)
+	if code != 200 || plan["status"] != "extracting" {
+		t.Fatalf("extraction plan did not enter extracting status=%d body=%v", code, plan)
+	}
+	code, candidates = doJSON(t, app, http.MethodGet, "/api/candidates?sessionId="+sessionID, nil)
+	if code != 200 || candidates["items"].([]any)[0].(map[string]any)["status"] != "extracting" {
+		t.Fatalf("candidate did not enter extracting status=%d body=%v", code, candidates)
 	}
 	extractionPrompt, err := os.ReadFile(extractionJob["promptPath"].(string))
 	if err != nil {
@@ -199,6 +215,9 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	}
 	if !strings.Contains(promptText, "For non-Go source candidates") {
 		t.Fatalf("extraction prompt does not require non-Go conversion:\n%s", promptText)
+	}
+	if strings.Contains(promptText, "Use at most 3 tool calls total") || strings.Contains(promptText, "Create no more than 8 files total") {
+		t.Fatalf("extraction prompt retained fixed limits that fail multi-candidate runs:\n%s", promptText)
 	}
 	code, inspected := doJSON(t, app, http.MethodGet, "/api/agent-jobs/"+extractionJob["id"].(string), nil)
 	if code != 200 {
@@ -225,6 +244,21 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	}
 	if !strings.Contains(string(candidateMetadata), candidate["id"].(string)) || !strings.Contains(string(candidateMetadata), `"targetLanguage": "go"`) {
 		t.Fatalf("candidate metadata missing approved candidate target language: %s", string(candidateMetadata))
+	}
+	if err := app.CompleteJob(context.Background(), extractionJob["id"].(string), 130, "job.interrupted"); err != nil {
+		t.Fatal(err)
+	}
+	code, session = doJSON(t, app, http.MethodGet, "/api/sessions/"+sessionID, nil)
+	if code != 200 || session["phase"] != "failed_extraction" {
+		t.Fatalf("failed extraction did not update session phase status=%d body=%v", code, session)
+	}
+	code, plan = doJSON(t, app, http.MethodGet, "/api/extraction-plans/"+planID, nil)
+	if code != 200 || plan["status"] != "failed" {
+		t.Fatalf("failed extraction did not update plan status=%d body=%v", code, plan)
+	}
+	code, candidates = doJSON(t, app, http.MethodGet, "/api/candidates?sessionId="+sessionID, nil)
+	if code != 200 || candidates["items"].([]any)[0].(map[string]any)["status"] != "extraction_planned" {
+		t.Fatalf("failed extraction did not restore candidate for retry status=%d body=%v", code, candidates)
 	}
 	code, missingPlan := doJSON(t, app, http.MethodPost, "/api/extraction-plans/missing/jobs", map[string]any{"provider": "fake"})
 	if code != 404 || missingPlan["error"].(map[string]any)["code"] != "resource.not_found" {

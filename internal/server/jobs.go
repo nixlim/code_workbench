@@ -290,7 +290,7 @@ func claudeSystemPromptForRole(role string) string {
 	case "repo_analysis", "candidate_scan":
 		return "Complete repository analysis within 6 tool calls. Emit at most 3 candidates. Prefer a useful structured CandidateReport over additional exploration. Never read persisted tool-output files outside the job workspace; rerun narrower commands inside the workspace instead."
 	case "extraction", "module_extraction":
-		return "Complete extraction within 3 tool calls and 8 output files. Generate a narrow reusable core, not a full port. Keep generated source under 120 lines and tests under 80 lines. Do not copy source files. Write a short artifact set, then stop."
+		return "Complete extraction with bounded tool use. Generate a narrow reusable artifact set for every approved candidate, not a full application port. Do not copy source files or install packages. Write the required files under the output root, then stop."
 	default:
 		return "Complete the requested work with bounded tool use. Avoid large command output. Finish with a concise completion summary."
 	}
@@ -474,7 +474,7 @@ func (a *App) enrichPromptData(ctx context.Context, data map[string]any, role, s
 			a.addSessionIntentToPrompt(ctx, data, subjectID)
 		}
 	case role == "extraction", role == "module_extraction":
-		data["OutputContract"] = "For each approved candidate, read its sourcePaths from the repo checkout, convert or rewrite the module into the candidate targetLanguage (default go), and emit production source files, unit tests, manifest.json, config.schema.json, docs, and provenance metadata under the OutputRoot."
+		data["OutputContract"] = "For each approved candidate, read its sourcePaths from the repo checkout, convert or rewrite the module into the candidate targetLanguage (default go), and emit compact production source, focused unit tests, manifest.json, config.schema.json, README.md, provenance.json, and status.json under the OutputRoot."
 		var approvedJSON, rejectedJSON string
 		if err := a.store.DB.QueryRowContext(ctx, `SELECT approved_candidate_ids_json, rejected_candidate_ids_json FROM extraction_plans WHERE id=?`, subjectID).Scan(&approvedJSON, &rejectedJSON); err == nil {
 			var approved, rejected []string
@@ -858,6 +858,9 @@ func (a *App) tryStartQueued(ctx context.Context) {
 			if job.Role == "repo_analysis" && job.SubjectType == "session" {
 				_ = a.transitionSession(ctx, job.SubjectID, "", "failed_analysis")
 			}
+			if job.Role == "extraction" || job.Role == "module_extraction" {
+				_ = a.completeExtractionJobState(ctx, job, "failed")
+			}
 			a.log.Event("job_start_failed", map[string]any{"jobId": job.ID, "role": job.Role, "provider": job.Provider, "errorCode": code, "error": message})
 			continue
 		}
@@ -897,8 +900,7 @@ func (a *App) ReconcileInterrupted(ctx context.Context) error {
 			active = st == "running"
 		}
 		if !active {
-			_, err := a.store.DB.ExecContext(ctx, `UPDATE agent_jobs SET status='failed', error_code='job.interrupted', finished_at=? WHERE id=?`, now(), job.ID)
-			if err != nil {
+			if err := a.CompleteJob(ctx, job.ID, 1, "job.interrupted"); err != nil {
 				return err
 			}
 			a.log.Event("job_interrupted", map[string]any{"jobId": job.ID})
@@ -1088,7 +1090,104 @@ func (a *App) CompleteJob(ctx context.Context, id string, exitCode int, errorCod
 	if job.Role == "repo_analysis" && status == "failed" {
 		_ = a.transitionSession(ctx, job.SubjectID, "", "failed_analysis")
 	}
+	if job.Role == "extraction" || job.Role == "module_extraction" {
+		if err := a.completeExtractionJobState(ctx, job, status); err != nil {
+			return err
+		}
+	}
 	a.log.Event("job_finished", map[string]any{"jobId": id, "status": status, "exitCode": exitCode, "errorCode": errorCode})
+	return nil
+}
+
+func (a *App) completeExtractionJobState(ctx context.Context, job Job, status string) error {
+	if job.SubjectType != "extraction_plan" {
+		return nil
+	}
+	sessionID, candidateIDs, err := a.extractionPlanScope(ctx, job.SubjectID)
+	if err != nil {
+		return err
+	}
+	ts := now()
+	if status == "succeeded" {
+		if _, err := a.store.DB.ExecContext(ctx, `UPDATE extraction_plans SET status='succeeded', updated_at=? WHERE id=?`, ts, job.SubjectID); err != nil {
+			return err
+		}
+		if len(candidateIDs) > 0 {
+			if err := a.updateCandidatesStatus(ctx, candidateIDs, "extracted", ts); err != nil {
+				return err
+			}
+		}
+		return a.moveExtractionSession(ctx, sessionID, "extracted")
+	}
+	if _, err := a.store.DB.ExecContext(ctx, `UPDATE extraction_plans SET status='failed', updated_at=? WHERE id=?`, ts, job.SubjectID); err != nil {
+		return err
+	}
+	if len(candidateIDs) > 0 {
+		if err := a.updateCandidatesStatus(ctx, candidateIDs, "extraction_planned", ts); err != nil {
+			return err
+		}
+	}
+	return a.moveExtractionSession(ctx, sessionID, "failed_extraction")
+}
+
+func (a *App) extractionPlanScope(ctx context.Context, planID string) (string, []string, error) {
+	var sessionID, approvedJSON string
+	if err := a.store.DB.QueryRowContext(ctx, `SELECT session_id,approved_candidate_ids_json FROM extraction_plans WHERE id=?`, planID).Scan(&sessionID, &approvedJSON); err != nil {
+		return "", nil, err
+	}
+	var candidateIDs []string
+	_ = json.Unmarshal([]byte(approvedJSON), &candidateIDs)
+	return sessionID, candidateIDs, nil
+}
+
+func (a *App) updateCandidatesStatus(ctx context.Context, ids []string, status, ts string) error {
+	for _, id := range ids {
+		if _, err := a.store.DB.ExecContext(ctx, `UPDATE candidates SET status=?, updated_at=? WHERE id=?`, status, ts, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) moveExtractionSession(ctx context.Context, sessionID, target string) error {
+	var phase string
+	if err := a.store.DB.QueryRowContext(ctx, `SELECT phase FROM repo_sessions WHERE id=?`, sessionID).Scan(&phase); err != nil {
+		return err
+	}
+	if phase == target {
+		return nil
+	}
+	switch target {
+	case "extracting":
+		return a.advanceToExtracting(ctx, sessionID, phase)
+	case "extracted", "failed_extraction":
+		if phase != "extracting" {
+			if err := a.advanceToExtracting(ctx, sessionID, phase); err != nil {
+				return err
+			}
+		}
+		return a.transitionSession(ctx, sessionID, "", target)
+	default:
+		return a.transitionSession(ctx, sessionID, "", target)
+	}
+}
+
+func (a *App) advanceToExtracting(ctx context.Context, sessionID, phase string) error {
+	switch phase {
+	case "awaiting_approval", "failed_extraction", "needs_user_input", "conflict_detected":
+		if err := a.transitionSession(ctx, sessionID, "", "extraction_planned"); err != nil {
+			return err
+		}
+		phase = "extraction_planned"
+	case "extraction_planned":
+	case "extracting":
+		return nil
+	default:
+		return a.transitionSession(ctx, sessionID, "", "extracting")
+	}
+	if phase == "extraction_planned" {
+		return a.transitionSession(ctx, sessionID, "", "extracting")
+	}
 	return nil
 }
 

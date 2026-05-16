@@ -522,6 +522,7 @@ func (a *App) handleCreateExtractionPlan(w http.ResponseWriter, r *http.Request)
 		for _, cid := range req.ApprovedCandidateIDs {
 			_, _ = a.store.DB.Exec(`UPDATE candidates SET status='extraction_planned', updated_at=? WHERE id=?`, now(), cid)
 		}
+		_ = a.moveExtractionSession(r.Context(), req.SessionID, "extraction_planned")
 	}
 	item, err := getSingle(a.store.DB, `SELECT * FROM extraction_plans WHERE id=?`, id)
 	one(w, err, 201, item)
@@ -546,7 +547,27 @@ func (a *App) handleExtractionJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status, job, err := a.QueueJob(r.Context(), "extraction", "extraction_plan", r.PathValue("planId"), req.Provider)
+	if err == nil && (status == 200 || status == 202) {
+		_ = a.markExtractionJobStarted(r.Context(), planID)
+	}
 	one(w, err, status, job)
+}
+
+func (a *App) markExtractionJobStarted(ctx context.Context, planID string) error {
+	sessionID, candidateIDs, err := a.extractionPlanScope(ctx, planID)
+	if err != nil {
+		return err
+	}
+	ts := now()
+	if _, err := a.store.DB.ExecContext(ctx, `UPDATE extraction_plans SET status='extracting', updated_at=? WHERE id=?`, ts, planID); err != nil {
+		return err
+	}
+	if len(candidateIDs) > 0 {
+		if err := a.updateCandidatesStatus(ctx, candidateIDs, "extracting", ts); err != nil {
+			return err
+		}
+	}
+	return a.moveExtractionSession(ctx, sessionID, "extracting")
 }
 
 func (a *App) handleListModules(w http.ResponseWriter, r *http.Request) {
