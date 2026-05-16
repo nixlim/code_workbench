@@ -1,6 +1,6 @@
 import ReactFlow, { Background, Controls, Handle, Position, addEdge, useEdgesState, useNodesState, type Connection, type NodeProps } from 'reactflow';
-import { AlertCircle, Boxes, Check, ChevronRight, Copy, FileText, GitBranch, Loader2, PlaySquare, Plus, RefreshCw, Settings2, Trash2, WandSparkles, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AlertCircle, Ban, Boxes, Check, ChevronDown, ChevronRight, Clock, Copy, FileText, GitBranch, LayoutDashboard, Loader2, PlaySquare, Plus, RefreshCw, Settings2, Trash2, WandSparkles, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { AgentJob, Candidate, Composition, ModuleRecord, Repository, Session, SessionCleanupResult, SpecEnrichment } from '../api/generated/types';
 import { APIRequestError, api } from '../api/client';
@@ -9,12 +9,17 @@ import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Select } from '../components/ui/select';
+import { Dialog } from '../components/ui/dialog';
+import { ConfirmProvider, useConfirm } from '../components/ui/confirm';
+import { WorkbenchView } from '../components/workbench/WorkbenchView';
 import { cn } from '../lib/utils';
 
-type Screen = 'registry' | 'spec' | 'composition' | 'modules' | 'jobs';
+type Screen = 'registry' | 'spec' | 'composition' | 'workbench' | 'modules' | 'jobs';
 type Port = { name: string; type: string; required?: boolean };
 type ModuleNodeData = { label: string; module: ModuleRecord };
 type TargetLanguageOption = { value: string; label: string };
+type StepState = 'todo' | 'active' | 'done' | 'blocked';
+type Navigate = (screen: Screen) => void;
 
 const defaultExtractionTargetLanguage = 'go';
 const targetLanguageOptions: TargetLanguageOption[] = [
@@ -38,6 +43,7 @@ const screens: Array<{ id: Screen; label: string; icon: React.ComponentType<{ si
   { id: 'registry', label: 'Registry & Extraction', icon: GitBranch },
   { id: 'spec', label: 'Spec Enrichment', icon: FileText },
   { id: 'composition', label: 'Composition', icon: WandSparkles },
+  { id: 'workbench', label: 'Workbench', icon: LayoutDashboard },
   { id: 'modules', label: 'Modules', icon: Boxes },
   { id: 'jobs', label: 'Agent Jobs', icon: PlaySquare }
 ];
@@ -46,21 +52,45 @@ const candidateReviewPhases = new Set(['awaiting_approval', 'candidates_ready'])
 const analysisRunningPhases = new Set(['queued', 'analysing']);
 const hasReviewableCandidates = (item: Session) => candidateReviewPhases.has(item.phase);
 const isAnalysisRunning = (item: Session) => analysisRunningPhases.has(item.phase);
+const isFailedPhase = (phase: string) => phase.startsWith('failed');
 const sessionNotice = (item: Session) => hasReviewableCandidates(item)
   ? `${item.repoName} analysis succeeded. Review proposed candidates.`
   : `Extraction session ${item.id} is ${item.phase}.`;
 const sessionActionLabel = (item: Session) => hasReviewableCandidates(item) ? 'Review candidates' : 'Continue';
 
+function useRunningJobCount() {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let active = true;
+    const poll = () => api.list<AgentJob>('/api/agent-jobs')
+      .then((r) => { if (active) setCount(r.items.filter((job) => job.status === 'running').length); })
+      .catch(() => { /* badge is best-effort */ });
+    void poll();
+    const timer = window.setInterval(poll, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+  return count;
+}
+
 export function App() {
+  return (
+    <ConfirmProvider>
+      <AppShell />
+    </ConfirmProvider>
+  );
+}
+
+function AppShell() {
   const [screen, setScreenState] = useState<Screen>(() => {
     const saved = window.localStorage.getItem('code-workbench:screen');
     return screens.some((item) => item.id === saved) ? saved as Screen : 'registry';
   });
   const [error, setError] = useState('');
-  const setScreen = (value: Screen) => {
+  const runningJobs = useRunningJobCount();
+  const setScreen = useCallback((value: Screen) => {
     setScreenState(value);
     window.localStorage.setItem('code-workbench:screen', value);
-  };
+  }, []);
 
   return (
     <div className="grid grid-cols-[56px_1fr] min-h-screen lg:grid-cols-[220px_1fr]">
@@ -68,23 +98,38 @@ export function App() {
         <div className="px-4 py-4 border-b border-sidebar-border hidden lg:block">
           <h1 className="text-sm font-semibold text-sidebar-text-active tracking-tight">Code Workbench</h1>
         </div>
-        <nav className="flex flex-col gap-0.5 p-2 flex-1">
+        <nav className="flex flex-col gap-0.5 p-2 flex-1" aria-label="Primary">
           {screens.map((item) => {
             const Icon = item.icon;
             const isActive = screen === item.id;
+            const badge = item.id === 'jobs' && runningJobs > 0 ? runningJobs : null;
             return (
               <button
                 key={item.id}
+                title={item.label}
+                aria-current={isActive ? 'page' : undefined}
                 className={cn(
-                  'flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm transition-colors duration-100 border-none cursor-pointer w-full text-left',
+                  'relative flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm transition-colors duration-100 border-none cursor-pointer w-full text-left justify-center lg:justify-start',
                   isActive
                     ? 'bg-sidebar-active text-sidebar-text-active font-medium'
                     : 'text-sidebar-text hover:bg-sidebar-hover hover:text-sidebar-text-active'
                 )}
                 onClick={() => setScreen(item.id)}
               >
-                <Icon size={16} />
-                <span className="hidden lg:inline">{item.label}</span>
+                <span className="relative shrink-0">
+                  <Icon size={16} />
+                  {badge !== null && (
+                    <span className="absolute -top-1.5 -right-1.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent-emphasis px-1 text-[9px] font-semibold text-white lg:hidden" aria-hidden="true">
+                      {badge}
+                    </span>
+                  )}
+                </span>
+                <span className="hidden lg:inline flex-1">{item.label}</span>
+                {badge !== null && (
+                  <span className="hidden lg:inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-accent-emphasis px-1 text-[10px] font-semibold text-white">
+                    {badge}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -96,18 +141,19 @@ export function App() {
       <main className="overflow-auto">
         <div className="max-w-[1400px] mx-auto p-6">
           {error && (
-            <div className="flex items-center gap-2 bg-danger-subtle border border-danger-muted text-danger-fg rounded-lg px-4 py-3 mb-4 text-sm animate-in">
+            <div role="alert" className="flex items-center gap-2 bg-danger-subtle border border-danger-muted text-danger-fg rounded-lg px-4 py-3 mb-4 text-sm animate-in">
               <AlertCircle size={16} className="shrink-0" />
               <span className="flex-1">{error}</span>
-              <button onClick={() => setError('')} className="p-0.5 hover:bg-danger-muted/30 rounded border-none cursor-pointer text-danger-fg">
+              <button onClick={() => setError('')} aria-label="Dismiss error" className="p-0.5 hover:bg-danger-muted/30 rounded border-none cursor-pointer text-danger-fg">
                 <X size={14} />
               </button>
             </div>
           )}
-          {screen === 'registry' && <RegistryExtractionWizard onError={setError} />}
+          {screen === 'registry' && <RegistryExtractionWizard onError={setError} onNavigate={setScreen} />}
           {screen === 'spec' && <SpecEnrichmentWizard onError={setError} />}
-          {screen === 'composition' && <CompositionWizard onError={setError} />}
-          {screen === 'modules' && <Modules onError={setError} />}
+          {screen === 'composition' && <CompositionWizard onError={setError} onNavigate={setScreen} />}
+          {screen === 'workbench' && <WorkbenchView onError={setError} />}
+          {screen === 'modules' && <Modules onError={setError} onNavigate={setScreen} />}
           {screen === 'jobs' && <Jobs onError={setError} />}
         </div>
       </main>
@@ -115,7 +161,8 @@ export function App() {
   );
 }
 
-function RegistryExtractionWizard({ onError }: { onError: (value: string) => void }) {
+function RegistryExtractionWizard({ onError, onNavigate }: { onError: (value: string) => void; onNavigate: Navigate }) {
+  const confirm = useConfirm();
   const [sourceType, setSourceType] = useState<'local_path' | 'git_url'>('local_path');
   const [sourceUri, setSourceUri] = useState('');
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -131,6 +178,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
   const [refreshedRepoId, setRefreshedRepoId] = useState('');
   const [activeSessionNotice, setActiveSessionNotice] = useState('');
   const [busyAction, setBusyAction] = useState('');
+  const [decisionBusy, setDecisionBusy] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [defaultTargetLanguage, setDefaultTargetLanguage] = useState(defaultExtractionTargetLanguage);
   const [candidateTargetLanguages, setCandidateTargetLanguages] = useState<Record<string, string>>({});
@@ -152,6 +200,14 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
         ? `Rescan ${repo.name} to refresh .sources, then describe what reusable functionality to extract.`
         : `Describe what reusable functionality to extract, then start candidate scan for ${repo.name}.`
     : 'Import a repository or choose a registered source.';
+
+  const stepStates: StepState[] = [
+    repo && (session || pendingSessionId) ? 'done' : 'active',
+    !session ? 'blocked' : candidates.length > 0 ? 'done' : 'active',
+    candidates.length === 0 ? 'blocked' : approvedIds.length > 0 ? 'done' : 'active',
+    approvedIds.length === 0 ? 'blocked' : planId ? 'done' : 'active'
+  ];
+  const activeStep = stepStates.findIndex((s) => s === 'active');
 
   const loadRepositories = () => api.list<Repository>('/api/repositories').then((r) => {
     setRepositories(r.items);
@@ -305,8 +361,16 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
     setSession(updated);
     await api.post<AgentJob>(`/api/sessions/${session.id}/analysis-jobs`, {});
     await loadSessions(repositories, true);
+    setMessage('Candidate scan started. Track progress under Agent Jobs.');
   };
   const clearPreviousSessions = async () => {
+    const decision = await confirm({
+      title: 'Clear previous extraction sessions?',
+      body: 'This permanently deletes every other extraction session. The currently selected session is kept.',
+      variant: 'danger',
+      confirmLabel: 'Clear sessions'
+    });
+    if (!decision.confirmed) return;
     const query = session?.id ? `?keepSessionId=${encodeURIComponent(session.id)}` : '';
     const result = await api.request<SessionCleanupResult>(`/api/sessions${query}`, { method: 'DELETE' });
     if (result.deleted > 0) {
@@ -319,8 +383,42 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
   const continueSession = (item: Session) => {
     activateSession(item);
   };
-  const decide = (candidate: Candidate, action: 'approve' | 'reject' | 'defer' | 'rescan') => {
-    void api.post<Candidate>(`/api/candidates/${candidate.id}/${action}`, { reason }).then(() => loadCandidates(candidate.sessionId)).catch((e) => onError(e.message));
+  const decide = async (candidate: Candidate, action: 'approve' | 'reject' | 'defer' | 'rescan') => {
+    let effectiveReason = reason;
+    if (action === 'reject') {
+      const decision = await confirm({
+        title: `Drop ${candidate.proposedName}?`,
+        body: 'This rejects the candidate so it will not be extracted.',
+        variant: 'danger',
+        confirmLabel: 'Drop candidate',
+        withReason: true,
+        reasonLabel: 'Decision reason',
+        defaultReason: reason
+      });
+      if (!decision.confirmed) return;
+      effectiveReason = decision.reason?.trim() || reason;
+    } else if (action === 'rescan') {
+      const decision = await confirm({
+        title: `Rescan ${candidate.proposedName}?`,
+        body: 'This re-runs analysis for this candidate and may create a new agent job.',
+        variant: 'primary',
+        confirmLabel: 'Rescan candidate',
+        withReason: true,
+        reasonLabel: 'Reason',
+        defaultReason: reason
+      });
+      if (!decision.confirmed) return;
+      effectiveReason = decision.reason?.trim() || reason;
+    }
+    setDecisionBusy(`${candidate.id}:${action}`);
+    try {
+      await api.post<Candidate>(`/api/candidates/${candidate.id}/${action}`, { reason: effectiveReason });
+      await loadCandidates(candidate.sessionId);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDecisionBusy('');
+    }
   };
   const openExtractionConfig = () => {
     const next: Record<string, string> = {};
@@ -367,16 +465,13 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
   return (
     <section className="space-y-4">
       <PageHeader title="Registry & Code Extraction" />
+      <NextActionBar text={nextAction} />
       <div className="space-y-4">
         {/* Step 1: Source */}
-        <Card>
-          <CardHeader>
-            <StepNumber n={1} />
-            <CardTitle>Source</CardTitle>
-          </CardHeader>
+        <StepCard n={1} title="Source" state={stepStates[0]} active={activeStep === 0}>
           <CardContent className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-              <Select value={sourceType} onChange={(e) => setSourceType(e.target.value as 'local_path' | 'git_url')}>
+              <Select value={sourceType} onChange={(e) => setSourceType(e.target.value as 'local_path' | 'git_url')} aria-label="Source type">
                 <option value="local_path">Local path</option>
                 <option value="git_url">Git URL</option>
               </Select>
@@ -394,20 +489,16 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
               </Button>
             </div>
 
-            {/* Next action banner */}
-            <div className="flex items-center gap-2 bg-attention-subtle border border-attention-muted rounded-md px-3 py-2 text-sm">
-              <ChevronRight size={14} className="text-attention-fg shrink-0" />
-              <span className="text-attention-fg font-medium">{nextAction}</span>
-            </div>
-
             {busyAction && (
               <div className="flex items-center gap-2 bg-accent-subtle border border-accent-fg/20 rounded-md px-3 py-2 text-sm text-accent-fg">
                 <Loader2 size={14} className="animate-spin" />
                 <span>{busyAction}</span>
               </div>
             )}
-            {message && <Notice>{message}</Notice>}
-            {activeSessionNotice && <Notice>{activeSessionNotice}</Notice>}
+            <LiveRegion>
+              {message && <Notice>{message}</Notice>}
+              {activeSessionNotice && <Notice>{activeSessionNotice}</Notice>}
+            </LiveRegion>
             {repo && repo.sourceCheckoutPath && (
               <div className="text-xs text-gray-500 font-mono bg-surface-secondary rounded px-2 py-1.5">
                 {repo.name} stored at {repo.sourceCheckoutPath}
@@ -436,7 +527,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
                       </Button>
                     </div>
                   ))}
-                  {repositories.length === 0 && <EmptyState>No registered sources.</EmptyState>}
+                  {repositories.length === 0 && <EmptyState>No registered sources. Import a repository above to begin.</EmptyState>}
                 </div>
               </div>
               <div>
@@ -448,44 +539,47 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
                   </Button>
                 </div>
                 <div className="space-y-1.5">
-                  {sessions.slice(0, 6).map((item) => (
-                    <div
-                      key={item.id}
-                      className={cn(
-                        'flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors duration-100',
-                        session?.id === item.id || pendingSessionId === item.id
-                          ? 'border-accent-fg bg-accent-subtle/50 ring-1 ring-accent-fg/20'
-                          : 'border-border-default bg-surface hover:bg-surface-secondary'
-                      )}
-                    >
-                      <span className="font-medium text-gray-900">{item.repoName}</span>
-                      <Badge variant={hasReviewableCandidates(item) ? 'success' : 'default'}>{item.phase}</Badge>
-                      <div className="flex-1" />
-                      <Button
-                        size="sm"
-                        variant={pendingSessionId === item.id || hasReviewableCandidates(item) ? 'attention' : 'default'}
-                        onClick={() => continueSession(item)}
+                  {sessions.slice(0, 6).map((item) => {
+                    const failed = isFailedPhase(item.phase);
+                    const reviewable = hasReviewableCandidates(item);
+                    return (
+                      <div
+                        key={item.id}
+                        className={cn(
+                          'flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors duration-100',
+                          session?.id === item.id || pendingSessionId === item.id
+                            ? 'border-accent-fg bg-accent-subtle/50 ring-1 ring-accent-fg/20'
+                            : 'border-border-default bg-surface hover:bg-surface-secondary'
+                        )}
                       >
-                        {sessionActionLabel(item)}
-                      </Button>
-                    </div>
-                  ))}
+                        <span className="font-medium text-gray-900">{item.repoName}</span>
+                        <Badge variant={reviewable ? 'success' : failed ? 'danger' : 'default'} title={failed ? `Session ${item.id} ${item.phase}` : undefined}>{item.phase}</Badge>
+                        <span className="flex items-center gap-1 text-xs text-gray-400" title={item.updatedAt}>
+                          <Clock size={11} />{relativeTime(item.updatedAt || item.createdAt)}
+                        </span>
+                        <div className="flex-1" />
+                        <Button
+                          size="sm"
+                          variant={pendingSessionId === item.id || reviewable ? 'attention' : 'default'}
+                          onClick={() => continueSession(item)}
+                        >
+                          {sessionActionLabel(item)}
+                        </Button>
+                      </div>
+                    );
+                  })}
                   {sessions.length === 0 && <EmptyState>No extraction sessions.</EmptyState>}
                 </div>
               </div>
             </div>
           </CardContent>
-        </Card>
+        </StepCard>
 
         {/* Step 2: Scan */}
-        <Card>
-          <CardHeader>
-            <StepNumber n={2} />
-            <CardTitle>Scan candidates</CardTitle>
-          </CardHeader>
+        <StepCard n={2} title="Scan candidates" state={stepStates[1]} active={activeStep === 1}>
           <CardContent className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-              <Input className="flex-1 min-w-[200px]" value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Reusable functionality to extract" />
+              <Input className="flex-1 min-w-[200px]" value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Reusable functionality to extract" aria-label="Reusable functionality to extract" />
               <Button variant={session && intent.trim() ? 'primary' : 'default'} disabled={!session} onClick={() => scan().catch((e) => onError(e.message))}>
                 Start candidate scan
               </Button>
@@ -493,101 +587,109 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
                 <RefreshCw size={14} />
                 Refresh
               </Button>
+              {session && (
+                <Button variant="ghost" size="sm" onClick={() => onNavigate('jobs')}>
+                  <PlaySquare size={13} /> View Agent Jobs
+                </Button>
+              )}
             </div>
             {session && (
               <div className="flex items-center gap-2 text-sm text-gray-600">
-                <Badge variant={isAnalysisRunning(session) ? 'accent' : 'default'}>{session.phase}</Badge>
+                <Badge variant={isAnalysisRunning(session) ? 'accent' : isFailedPhase(session.phase) ? 'danger' : 'default'}>{session.phase}</Badge>
                 <span className="text-gray-500">{session.repoName}</span>
               </div>
             )}
           </CardContent>
-        </Card>
+        </StepCard>
 
         {/* Step 3: Compare and approve */}
-        <Card>
-          <CardHeader>
-            <StepNumber n={3} />
-            <CardTitle>Compare and approve</CardTitle>
-            <div className="flex-1" />
-            {candidates.length > 0 && (
-              <span className="text-xs text-gray-500">{approvedIds.length} approved of {candidates.length}</span>
-            )}
-          </CardHeader>
+        <StepCard
+          n={3}
+          title="Compare and approve"
+          state={stepStates[2]}
+          active={activeStep === 2}
+          aside={candidates.length > 0 ? <span className="text-xs text-gray-500">{approvedIds.length} approved of {candidates.length}</span> : undefined}
+        >
           <CardContent className="space-y-3">
-            <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Decision reason" className="max-w-md" />
+            <label className="block space-y-1 max-w-md">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Default approval reason</span>
+              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Decision reason" />
+            </label>
             <div className="space-y-2">
-              {candidates.map((candidate) => (
-                <div key={candidate.id} className="rounded-md border border-border-default bg-surface p-3 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium text-gray-900">{candidate.proposedName}</span>
-                    <Badge variant={candidate.status === 'approved' ? 'success' : candidate.status === 'rejected' ? 'danger' : 'default'}>
-                      {candidate.status}
-                    </Badge>
-                    <Badge>{candidate.registryDecision ?? 'add'}</Badge>
-                    <span className="text-xs text-gray-500 font-mono">{candidate.comparedModuleId ?? 'new registry module'}</span>
+              {candidates.map((candidate) => {
+                const busyFor = (action: string) => decisionBusy === `${candidate.id}:${action}`;
+                return (
+                  <div key={candidate.id} className="rounded-md border border-border-default bg-surface p-3 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-gray-900">{candidate.proposedName}</span>
+                      <Badge variant={candidate.status === 'approved' ? 'success' : candidate.status === 'rejected' ? 'danger' : 'default'}>
+                        {candidate.status}
+                      </Badge>
+                      <Badge>{candidate.registryDecision ?? 'add'}</Badge>
+                      <span className="text-xs text-gray-500 font-mono">{candidate.comparedModuleId ?? 'new registry module'}</span>
+                    </div>
+                    {candidate.description && <p className="text-sm text-gray-600 m-0">{candidate.description}</p>}
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                      <span>Agent language hint</span>
+                      <Badge>{targetLanguageLabel(candidate.targetLanguage)}</Badge>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      <Button size="sm" variant="success" disabled={candidate.registryDecision === 'drop' || Boolean(decisionBusy)} onClick={() => decide(candidate, 'approve')}>
+                        {busyFor('approve') ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />} Approve
+                      </Button>
+                      <Button size="sm" variant="danger" disabled={Boolean(decisionBusy)} onClick={() => decide(candidate, 'reject')}>
+                        {busyFor('reject') ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />} Drop
+                      </Button>
+                      <Button size="sm" disabled={Boolean(decisionBusy)} onClick={() => decide(candidate, 'defer')}>Defer</Button>
+                      <Button size="sm" disabled={Boolean(decisionBusy)} onClick={() => decide(candidate, 'rescan')}>Rescan</Button>
+                    </div>
                   </div>
-                  {candidate.description && <p className="text-sm text-gray-600 m-0">{candidate.description}</p>}
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                    <span>Agent language hint</span>
-                    <Badge>{targetLanguageLabel(candidate.targetLanguage)}</Badge>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    <Button size="sm" variant="success" disabled={candidate.registryDecision === 'drop'} onClick={() => decide(candidate, 'approve')}>
-                      <Check size={12} /> Approve
-                    </Button>
-                    <Button size="sm" variant="danger" onClick={() => decide(candidate, 'reject')}>
-                      <X size={12} /> Drop
-                    </Button>
-                    <Button size="sm" onClick={() => decide(candidate, 'defer')}>Defer</Button>
-                    <Button size="sm" onClick={() => decide(candidate, 'rescan')}>Rescan</Button>
-                  </div>
-                </div>
-              ))}
-              {candidates.length === 0 && <EmptyState>No candidates to review yet.</EmptyState>}
+                );
+              })}
+              {candidates.length === 0 && <EmptyState>No candidates to review yet. Start a candidate scan in step 2.</EmptyState>}
             </div>
           </CardContent>
-        </Card>
+        </StepCard>
 
         {/* Step 4: Extraction */}
-        <Card>
-          <CardHeader>
-            <StepNumber n={4} />
-            <CardTitle>Extraction</CardTitle>
-          </CardHeader>
+        <StepCard n={4} title="Extraction" state={stepStates[3]} active={activeStep === 3}>
           <CardContent className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <Button disabled={approvedIds.length === 0} onClick={openExtractionConfig}>
                 <Settings2 size={14} />
                 Configure extraction job
               </Button>
-              <Button variant="primary" disabled={!planId} onClick={() => api.post(`/api/extraction-plans/${planId}/jobs`, {}).catch((e) => onError(e.message))}>Run extraction job</Button>
+              <Button variant="primary" disabled={!planId} onClick={() => api.post(`/api/extraction-plans/${planId}/jobs`, {}).then(() => { setMessage('Extraction job started. Track progress under Agent Jobs.'); }).catch((e) => onError(e.message))}>Run extraction job</Button>
+              {planId && (
+                <Button variant="ghost" size="sm" onClick={() => onNavigate('jobs')}>
+                  <PlaySquare size={13} /> View Agent Jobs
+                </Button>
+              )}
             </div>
             {approvedIds.length > 0 && !planId && <Notice variant="muted">Configure the extraction job to set output language and candidate-specific settings before creating a plan.</Notice>}
             {approvedIds.length === 0 && <Notice variant="muted">Extraction is blocked until at least one candidate is approved.</Notice>}
             {planId && (
-              <div className="text-xs font-mono text-gray-500 bg-surface-secondary rounded px-2 py-1.5">
-                Plan {planId}
-              </div>
+              <CopyablePath label="Plan" value={planId} />
             )}
           </CardContent>
-        </Card>
+        </StepCard>
       </div>
-      {configOpen && (
-        <ExtractionJobConfigModal
-          candidates={approvedCandidates}
-          defaultTargetLanguage={defaultTargetLanguage}
-          candidateTargetLanguages={candidateTargetLanguages}
-          onDefaultTargetLanguageChange={applyDefaultTargetLanguage}
-          onCandidateTargetLanguageChange={setCandidateTargetLanguage}
-          onClose={() => setConfigOpen(false)}
-          onSubmit={() => configureAndCreatePlan().catch((e) => onError(e.message))}
-        />
-      )}
+      <ExtractionJobConfigModal
+        open={configOpen}
+        candidates={approvedCandidates}
+        defaultTargetLanguage={defaultTargetLanguage}
+        candidateTargetLanguages={candidateTargetLanguages}
+        onDefaultTargetLanguageChange={applyDefaultTargetLanguage}
+        onCandidateTargetLanguageChange={setCandidateTargetLanguage}
+        onClose={() => setConfigOpen(false)}
+        onSubmit={() => configureAndCreatePlan().catch((e) => onError(e.message))}
+      />
     </section>
   );
 }
 
 function ExtractionJobConfigModal({
+  open,
   candidates,
   defaultTargetLanguage,
   candidateTargetLanguages,
@@ -596,6 +698,7 @@ function ExtractionJobConfigModal({
   onClose,
   onSubmit
 }: {
+  open: boolean;
   candidates: Candidate[];
   defaultTargetLanguage: string;
   candidateTargetLanguages: Record<string, string>;
@@ -605,60 +708,58 @@ function ExtractionJobConfigModal({
   onSubmit: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="presentation">
-      <section className="w-full max-w-3xl rounded-lg border border-border-default bg-surface shadow-xl" role="dialog" aria-modal="true" aria-labelledby="extraction-config-title">
-        <header className="flex items-center gap-3 border-b border-border-default px-4 py-3">
-          <Settings2 size={16} className="text-accent-fg" />
-          <div>
-            <h3 id="extraction-config-title" className="m-0 text-base font-semibold text-gray-900">Configure extraction job</h3>
-            <p className="m-0 text-xs text-gray-500">Set the reusable module output language before creating the extraction plan.</p>
-          </div>
-          <div className="flex-1" />
-          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close extraction job configuration">
-            <X size={14} />
-          </Button>
-        </header>
-        <div className="space-y-4 px-4 py-4">
-          <div className="rounded-md border border-border-default bg-surface-secondary p-3">
-            <label className="flex flex-wrap items-center gap-3 text-sm">
-              <span className="font-medium text-gray-700">Default output language</span>
-              <Select value={defaultTargetLanguage} onChange={(e) => onDefaultTargetLanguageChange(e.target.value)} aria-label="Default output language">
-                {targetLanguageOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </Select>
-            </label>
-          </div>
-          <div className="space-y-2">
-            {candidates.map((candidate) => (
-              <article key={candidate.id} className="rounded-md border border-border-default bg-surface p-3">
-                <div className="flex flex-wrap items-start gap-3">
-                  <div className="min-w-[220px] flex-1">
-                    <div className="font-medium text-gray-900">{candidate.proposedName}</div>
-                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                      <span>Agent language hint</span>
-                      <Badge>{targetLanguageLabel(candidate.targetLanguage)}</Badge>
-                    </div>
-                  </div>
-                  <label className="flex items-center gap-2 text-sm">
-                    <span className="text-gray-600">Output</span>
-                    <Select
-                      value={candidateTargetLanguages[candidate.id] ?? defaultTargetLanguage}
-                      onChange={(e) => onCandidateTargetLanguageChange(candidate.id, e.target.value)}
-                      aria-label={`${candidate.proposedName} output language`}
-                    >
-                      {targetLanguageOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                    </Select>
-                  </label>
-                </div>
-              </article>
-            ))}
-          </div>
+    <Dialog open={open} onClose={onClose} labelledBy="extraction-config-title">
+      <header className="flex items-center gap-3 border-b border-border-default px-4 py-3">
+        <Settings2 size={16} className="text-accent-fg" />
+        <div>
+          <h3 id="extraction-config-title" className="m-0 text-base font-semibold text-gray-900">Configure extraction job</h3>
+          <p className="m-0 text-xs text-gray-500">Set the reusable module output language before creating the extraction plan.</p>
         </div>
-        <footer className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-3">
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={onSubmit}>Save configuration and create plan</Button>
-        </footer>
-      </section>
-    </div>
+        <div className="flex-1" />
+        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close extraction job configuration">
+          <X size={14} />
+        </Button>
+      </header>
+      <div className="space-y-4 px-4 py-4">
+        <div className="rounded-md border border-border-default bg-surface-secondary p-3">
+          <label className="flex flex-wrap items-center gap-3 text-sm">
+            <span className="font-medium text-gray-700">Default output language</span>
+            <Select value={defaultTargetLanguage} onChange={(e) => onDefaultTargetLanguageChange(e.target.value)} aria-label="Default output language">
+              {targetLanguageOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </Select>
+          </label>
+        </div>
+        <div className="space-y-2">
+          {candidates.map((candidate) => (
+            <article key={candidate.id} className="rounded-md border border-border-default bg-surface p-3">
+              <div className="flex flex-wrap items-start gap-3">
+                <div className="min-w-[220px] flex-1">
+                  <div className="font-medium text-gray-900">{candidate.proposedName}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                    <span>Agent language hint</span>
+                    <Badge>{targetLanguageLabel(candidate.targetLanguage)}</Badge>
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <span className="text-gray-600">Output</span>
+                  <Select
+                    value={candidateTargetLanguages[candidate.id] ?? defaultTargetLanguage}
+                    onChange={(e) => onCandidateTargetLanguageChange(candidate.id, e.target.value)}
+                    aria-label={`${candidate.proposedName} output language`}
+                  >
+                    {targetLanguageOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </Select>
+                </label>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+      <footer className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-3">
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="primary" onClick={onSubmit}>Save configuration and create plan</Button>
+      </footer>
+    </Dialog>
   );
 }
 
@@ -666,9 +767,11 @@ function SpecEnrichmentWizard({ onError }: { onError: (value: string) => void })
   const [specPath, setSpecPath] = useState('');
   const [enrichment, setEnrichment] = useState<SpecEnrichment | null>(null);
   const create = () => api.post<SpecEnrichment>('/api/spec-enrichments', { specPath }).then(setEnrichment).catch((e) => onError(e.message));
-  const start = () => enrichment && api.post<AgentJob>(`/api/spec-enrichments/${enrichment.id}/jobs`, {}).then(() => api.get<SpecEnrichment>(`/api/spec-enrichments/${enrichment.id}`).then(setEnrichment)).catch((e) => onError(e.message));
+  const refresh = () => enrichment && api.get<SpecEnrichment>(`/api/spec-enrichments/${enrichment.id}`).then(setEnrichment).catch((e) => onError(e.message));
+  const start = () => enrichment && api.post<AgentJob>(`/api/spec-enrichments/${enrichment.id}/jobs`, {}).then(() => refresh()).catch((e) => onError(e.message));
+  const statusVariant = enrichment?.status === 'succeeded' ? 'success' : enrichment?.status === 'failed' ? 'danger' : enrichment?.status === 'running' || enrichment?.status === 'queued' ? 'accent' : 'default';
   return (
-    <section className="space-y-4">
+    <section className="max-w-3xl space-y-4">
       <PageHeader title="Spec Enrichment" />
       <Card>
         <CardHeader>
@@ -676,21 +779,46 @@ function SpecEnrichmentWizard({ onError }: { onError: (value: string) => void })
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            <Input className="flex-1 min-w-[200px]" value={specPath} onChange={(e) => setSpecPath(e.target.value)} placeholder="/absolute/path/to/spec.md" />
-            <Button onClick={create}>Create enrichment</Button>
+            <Input className="flex-1 min-w-[200px]" value={specPath} onChange={(e) => setSpecPath(e.target.value)} placeholder="/absolute/path/to/spec.md" aria-label="Spec file path" />
+            <Button variant={specPath.trim() && !enrichment ? 'primary' : 'default'} disabled={!specPath.trim()} onClick={create}>Create enrichment</Button>
             <Button disabled={!enrichment} onClick={start}>Select registry references</Button>
-            <Button variant="ghost" size="icon" disabled={!enrichment} onClick={() => enrichment && api.get<SpecEnrichment>(`/api/spec-enrichments/${enrichment.id}`).then(setEnrichment).catch((e) => onError(e.message))}>
+            <Button variant="ghost" size="icon" disabled={!enrichment} aria-label="Refresh enrichment" onClick={() => void refresh()}>
               <RefreshCw size={14} />
             </Button>
           </div>
-          {enrichment && <DataTable rows={[enrichment]} columns={['status', 'specPath', 'outputPath', 'selectedModulesJson']} />}
+          {!enrichment && (
+            <EmptyState>Point at an absolute spec path and create an enrichment. The enriched spec and registry references appear here once the job runs.</EmptyState>
+          )}
         </CardContent>
       </Card>
+      {enrichment && (
+        <Card className="animate-in">
+          <CardHeader>
+            <CardTitle>Enrichment</CardTitle>
+            <Badge variant={statusVariant}>{enrichment.status}</Badge>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Field label="Spec path"><code className="text-xs font-mono break-all">{enrichment.specPath}</code></Field>
+              <Field label="Output path">{enrichment.outputPath ? <CopyablePath value={enrichment.outputPath} /> : <span className="text-sm text-gray-400">Available after the job succeeds</span>}</Field>
+              {enrichment.registryReferencesPath && (
+                <Field label="Registry references"><CopyablePath value={enrichment.registryReferencesPath} /></Field>
+              )}
+              <Field label="Artifact root"><code className="text-xs font-mono break-all">{enrichment.artifactRoot}</code></Field>
+            </div>
+            {enrichment.status === 'succeeded'
+              ? <Notice>Enriched spec is ready at the output path above. Feed it into composition or your downstream build.</Notice>
+              : enrichment.status === 'failed'
+                ? <Notice variant="muted">The enrichment job failed. Check Agent Jobs for the transcript, then recreate the enrichment.</Notice>
+                : <Notice variant="muted">Run “Select registry references” to enrich this spec against the module registry.</Notice>}
+          </CardContent>
+        </Card>
+      )}
     </section>
   );
 }
 
-function CompositionWizard({ onError }: { onError: (value: string) => void }) {
+function CompositionWizard({ onError, onNavigate }: { onError: (value: string) => void; onNavigate: Navigate }) {
   const [modules, setModules] = useState<ModuleRecord[]>([]);
   const [intent, setIntent] = useState('');
   const [composition, setComposition] = useState<Composition | null>(null);
@@ -753,16 +881,36 @@ function CompositionWizard({ onError }: { onError: (value: string) => void }) {
   const refresh = () => composition && api.get<Composition>(`/api/compositions/${composition.id}`).then(setComposition).catch((e) => onError(e.message));
   const questions = Array.isArray(composition?.questionsJson) ? composition.questionsJson : [];
   const allAnswered = questions.length > 0 && questions.every((q) => q.id && answers[q.id]);
+  const compiled = Boolean(composition?.blueprintPath || composition?.specPath);
+
+  const stepStates: StepState[] = [
+    nodes.length > 0 ? 'done' : 'active',
+    !composition ? (selectedModuleIds.length > 0 && intent ? 'active' : 'blocked') : 'done',
+    questions.length === 0 ? 'blocked' : allAnswered ? 'done' : 'active',
+    compiled ? 'done' : composition?.status === 'ready_to_compile' ? 'active' : 'blocked'
+  ];
+  const activeStep = stepStates.findIndex((s) => s === 'active');
+  const nextAction = compiled
+    ? 'Composition compiled. Open the blueprint in Workbench or hand the spec to your build.'
+    : !composition
+      ? nodes.length === 0
+        ? 'Add modules from the palette to the canvas.'
+        : !intent
+          ? 'Describe the composition intent, then create the composition.'
+          : 'Create the composition to lock in the selected modules.'
+      : composition.status === 'ready_to_compile'
+        ? 'All questions answered. Compile the blueprint and spec.'
+        : questions.length === 0
+          ? 'Ask clarifying questions to refine the composition.'
+          : 'Answer the clarifying questions, then save answers.';
+
   return (
     <section className="space-y-4">
       <PageHeader title="Freeform Composition" />
+      <NextActionBar text={nextAction} />
       <div className="space-y-4">
         {/* Canvas */}
-        <Card>
-          <CardHeader>
-            <StepNumber n={1} />
-            <CardTitle>Compose system</CardTitle>
-          </CardHeader>
+        <StepCard n={1} title="Compose system" state={stepStates[0]} active={activeStep === 0}>
           <CardContent className="p-0">
             <div className="grid grid-cols-[200px_1fr_240px] h-[min(580px,calc(100vh-240px))] min-h-[420px]">
               {/* Palette */}
@@ -778,7 +926,7 @@ function CompositionWizard({ onError }: { onError: (value: string) => void }) {
                     <span className="text-xs text-gray-400 ml-auto">{module.version}</span>
                   </button>
                 ))}
-                {modules.length === 0 && <EmptyState>No modules available.</EmptyState>}
+                {modules.length === 0 && <EmptyState>No modules available. Approve and extract candidates first.</EmptyState>}
               </div>
               {/* Canvas */}
               <div className="relative" aria-label="Composition canvas">
@@ -811,36 +959,28 @@ function CompositionWizard({ onError }: { onError: (value: string) => void }) {
               </div>
             </div>
           </CardContent>
-        </Card>
+        </StepCard>
 
         {/* Intent */}
-        <Card>
-          <CardHeader>
-            <StepNumber n={2} />
-            <CardTitle>Clarify intent</CardTitle>
-          </CardHeader>
+        <StepCard n={2} title="Clarify intent" state={stepStates[1]} active={activeStep === 1}>
           <CardContent className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-              <Input className="flex-1 min-w-[200px]" value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Composition intent" />
+              <Input className="flex-1 min-w-[200px]" value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="Composition intent" aria-label="Composition intent" />
               <Button disabled={selectedModuleIds.length === 0 || !intent} onClick={() => create().catch((e) => onError(e.message))}>Create composition</Button>
               <Button disabled={!composition} onClick={() => saveLayout().catch((e) => onError(e.message))}>Save layout</Button>
               <Button variant="primary" disabled={!composition} onClick={() => composition && api.post(`/api/compositions/${composition.id}/clarification-jobs`, {}).then(refresh).catch((e) => onError(e.message))}>
                 Ask clarifying questions
               </Button>
-              <Button variant="ghost" size="icon" disabled={!composition} onClick={() => void refresh()}>
+              <Button variant="ghost" size="icon" disabled={!composition} aria-label="Refresh composition" onClick={() => void refresh()}>
                 <RefreshCw size={14} />
               </Button>
             </div>
-            {composition && <Badge variant={composition.status === 'ready_to_compile' ? 'success' : 'default'}>{composition.status}</Badge>}
+            {composition && <Badge variant={composition.status === 'ready_to_compile' ? 'success' : composition.status === 'failed' ? 'danger' : 'default'}>{composition.status}</Badge>}
           </CardContent>
-        </Card>
+        </StepCard>
 
         {/* Answers */}
-        <Card>
-          <CardHeader>
-            <StepNumber n={3} />
-            <CardTitle>Answers</CardTitle>
-          </CardHeader>
+        <StepCard n={3} title="Answers" state={stepStates[2]} active={activeStep === 2}>
           <CardContent className="space-y-3">
             {questions.length === 0 && <EmptyState>Questions appear after the clarification job succeeds.</EmptyState>}
             {questions.map((question) => (
@@ -859,32 +999,32 @@ function CompositionWizard({ onError }: { onError: (value: string) => void }) {
               </Button>
             )}
           </CardContent>
-        </Card>
+        </StepCard>
 
         {/* Compile */}
-        <Card>
-          <CardHeader>
-            <StepNumber n={4} />
-            <CardTitle>Compile</CardTitle>
-          </CardHeader>
+        <StepCard n={4} title="Compile" state={stepStates[3]} active={activeStep === 3}>
           <CardContent className="space-y-3">
-            <Button variant="primary" disabled={!composition || composition.status !== 'ready_to_compile'} onClick={() => composition && api.post(`/api/compositions/${composition.id}/compile-jobs`, {}).then(refresh).catch((e) => onError(e.message))}>
-              Compile blueprint and spec
-            </Button>
-            {composition?.blueprintPath && (
-              <div className="text-xs font-mono text-gray-500 bg-surface-secondary rounded px-2 py-1.5">{composition.blueprintPath}</div>
-            )}
-            {composition?.specPath && (
-              <div className="text-xs font-mono text-gray-500 bg-surface-secondary rounded px-2 py-1.5">{composition.specPath}</div>
-            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="primary" disabled={!composition || composition.status !== 'ready_to_compile'} onClick={() => composition && api.post(`/api/compositions/${composition.id}/compile-jobs`, {}).then(refresh).catch((e) => onError(e.message))}>
+                Compile blueprint and spec
+              </Button>
+              {compiled && (
+                <Button onClick={() => onNavigate('workbench')}>
+                  <LayoutDashboard size={14} /> Open in Workbench
+                </Button>
+              )}
+            </div>
+            {composition?.blueprintPath && <CopyablePath label="Blueprint" value={composition.blueprintPath} />}
+            {composition?.specPath && <CopyablePath label="Spec" value={composition.specPath} />}
+            {compiled && <Notice>Blueprint and spec compiled. Open the wiring canvas in Workbench to generate code, or hand the spec to your build pipeline.</Notice>}
           </CardContent>
-        </Card>
+        </StepCard>
       </div>
     </section>
   );
 }
 
-function Modules({ onError }: { onError: (value: string) => void }) {
+function Modules({ onError, onNavigate }: { onError: (value: string) => void; onNavigate: Navigate }) {
   const [items, setItems] = useState<ModuleRecord[]>([]);
   useEffect(() => { api.list<ModuleRecord>('/api/modules').then((r) => setItems(r.items)).catch((e) => onError(e.message)); }, []);
   return (
@@ -892,7 +1032,18 @@ function Modules({ onError }: { onError: (value: string) => void }) {
       <PageHeader title="Modules" />
       <Card>
         <CardContent className="p-0">
-          <DataTable rows={items} columns={['name', 'version', 'registryDecision', 'supersedesModuleId', 'supersededByModuleId', 'sourceCheckoutPath', 'testStatus', 'availableInWorkbench']} />
+          <DataTable
+            rows={items}
+            columns={['name', 'version', 'registryDecision', 'supersedesModuleId', 'supersededByModuleId', 'sourceCheckoutPath', 'testStatus', 'availableInWorkbench']}
+            empty={(
+              <div className="space-y-2">
+                <p className="m-0">No modules in the registry yet.</p>
+                <Button size="sm" onClick={() => onNavigate('registry')}>
+                  <GitBranch size={13} /> Go to Registry &amp; Extraction
+                </Button>
+              </div>
+            )}
+          />
         </CardContent>
       </Card>
     </section>
@@ -900,6 +1051,7 @@ function Modules({ onError }: { onError: (value: string) => void }) {
 }
 
 function Jobs({ onError }: { onError: (value: string) => void }) {
+  const confirm = useConfirm();
   const [items, setItems] = useState<AgentJob[]>([]);
   const [inspected, setInspected] = useState<AgentJob | null>(null);
   const [attachCommand, setAttachCommand] = useState('');
@@ -930,6 +1082,17 @@ function Jobs({ onError }: { onError: (value: string) => void }) {
     setAttachCommand(opened.attachCommand);
     return api.get<AgentJob>(`/api/agent-jobs/${job.id}`).then((detail) => setInspected({ ...detail, ...opened }));
   }).catch((e) => onError(e.message));
+  const cancelJob = async (job: AgentJob) => {
+    const decision = await confirm({
+      title: `Cancel ${job.role} job?`,
+      body: 'This stops the running agent job. Completed work is kept but the job will not finish.',
+      variant: 'danger',
+      confirmLabel: 'Cancel job',
+      cancelLabel: 'Keep running'
+    });
+    if (!decision.confirmed) return;
+    await api.post(`/api/agent-jobs/${job.id}/cancel`).then(load).catch((e) => onError(e.message));
+  };
   useEffect(() => {
     void load();
     if (selectedJobId) {
@@ -957,35 +1120,41 @@ function Jobs({ onError }: { onError: (value: string) => void }) {
 
       <Card>
         <CardContent className="p-0">
-          <DataTable rows={items} columns={['role', 'provider', 'status', 'subjectType', 'subjectId', 'tmuxSessionName', 'createdAt', 'finishedAt']} />
+          <div className="divide-y divide-border-subtle">
+            {items.map((j) => {
+              const selected = inspected?.id === j.id;
+              return (
+                <div
+                  key={j.id}
+                  className={cn(
+                    'flex flex-wrap items-center gap-2 px-3 py-2.5 text-sm transition-colors duration-100',
+                    selected ? 'bg-accent-subtle/50' : 'hover:bg-surface-secondary'
+                  )}
+                >
+                  <span className="font-medium text-gray-900">{j.role}</span>
+                  <Badge variant={j.status === 'succeeded' ? 'success' : j.status === 'failed' ? 'danger' : j.status === 'running' ? 'accent' : 'default'}>
+                    {j.status}
+                  </Badge>
+                  <span className="text-xs text-gray-500">{j.provider}</span>
+                  <span className="flex items-center gap-1 text-xs text-gray-400" title={j.createdAt}>
+                    <Clock size={11} />{relativeTime(j.finishedAt || j.startedAt || j.createdAt)}
+                  </span>
+                  <span className="text-xs text-gray-400 font-mono truncate max-w-[180px]">{j.id}</span>
+                  <div className="flex-1" />
+                  <div className="flex gap-1">
+                    <Button size="sm" onClick={() => inspect(j)}>Inspect</Button>
+                    <Button size="sm" onClick={() => openJob(j)}>Open</Button>
+                    <Button size="sm" variant="danger" disabled={j.status !== 'running' && j.status !== 'queued'} onClick={() => void cancelJob(j)}>
+                      <Ban size={12} /> Cancel
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+            {items.length === 0 && <EmptyState>No agent jobs yet. Start a candidate scan or extraction to create one.</EmptyState>}
+          </div>
         </CardContent>
       </Card>
-
-      <div className="space-y-1.5">
-        {items.map((j) => (
-          <div
-            key={j.id}
-            className={cn(
-              'flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors duration-100',
-              inspected?.id === j.id
-                ? 'border-accent-fg bg-accent-subtle/50 ring-1 ring-accent-fg/20'
-                : 'border-border-default bg-surface hover:bg-surface-secondary'
-            )}
-          >
-            <span className="font-medium text-gray-900">{j.role}</span>
-            <Badge variant={j.status === 'succeeded' ? 'success' : j.status === 'failed' ? 'danger' : j.status === 'running' ? 'accent' : 'default'}>
-              {j.status}
-            </Badge>
-            <span className="text-xs text-gray-500 font-mono">{j.id}</span>
-            <div className="flex-1" />
-            <div className="flex gap-1">
-              <Button size="sm" onClick={() => inspect(j)}>Inspect</Button>
-              <Button size="sm" onClick={() => openJob(j)}>Open</Button>
-              <Button size="sm" variant="danger" onClick={() => api.post(`/api/agent-jobs/${j.id}/cancel`).then(load).catch((e) => onError(e.message))}>Cancel</Button>
-            </div>
-          </div>
-        ))}
-      </div>
 
       {inspected && <JobInspector job={inspected} />}
     </section>
@@ -997,6 +1166,7 @@ function JobInspector({ job }: { job: AgentJob }) {
   const files = job.outputFiles ?? [];
   const hasFailureDetail = job.errorCode || job.exitCode !== undefined;
   const attachCommand = tmuxAttachCommand(job);
+  const running = job.status === 'running';
   return (
     <Card className="animate-in">
       <CardHeader>
@@ -1004,11 +1174,14 @@ function JobInspector({ job }: { job: AgentJob }) {
         <Badge variant={job.status === 'succeeded' ? 'success' : job.status === 'failed' ? 'danger' : job.status === 'running' ? 'accent' : 'default'}>
           {job.status}
         </Badge>
+        <span className="flex items-center gap-1 text-xs text-gray-400" title={job.createdAt}>
+          <Clock size={11} />{relativeTime(job.finishedAt || job.startedAt || job.createdAt)}
+        </span>
       </CardHeader>
       <CardContent className="space-y-4">
         {(attachCommand || job.tmuxSessionName) && (
           <div className="bg-surface-secondary border border-border-subtle rounded-md p-3 space-y-2">
-            <SectionLabel>{job.status === 'running' ? 'Live session' : 'tmux session'}</SectionLabel>
+            <SectionLabel>{running ? 'Live session' : 'tmux session'}</SectionLabel>
             {job.tmuxSessionName && <div className="text-xs font-mono text-gray-600">{job.tmuxSessionName}</div>}
             {attachCommand && <CommandBlock value={attachCommand} />}
           </div>
@@ -1048,9 +1221,9 @@ function JobInspector({ job }: { job: AgentJob }) {
 
         {/* Logs */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <LogBlock title="Prompt" path={job.prompt?.path ?? job.promptPath} content={job.prompt?.content ?? ''} truncated={job.prompt?.truncated} />
-          <LogBlock title="Transcript" path={job.transcript?.path ?? job.transcriptPath} content={job.transcript?.content ?? ''} truncated={job.transcript?.truncated} />
-          {job.activityLog && <LogBlock title="Live activity" path={job.activityLog.path} content={job.activityLog.content} truncated={job.activityLog.truncated} />}
+          <LogViewer title="Prompt" path={job.prompt?.path ?? job.promptPath} content={job.prompt?.content ?? ''} truncated={job.prompt?.truncated} />
+          <LogViewer title="Transcript" path={job.transcript?.path ?? job.transcriptPath} content={job.transcript?.content ?? ''} truncated={job.transcript?.truncated} autoScroll={running} />
+          {job.activityLog && <LogViewer title="Live activity" path={job.activityLog.path} content={job.activityLog.content} truncated={job.activityLog.truncated} autoScroll={running} />}
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1061,7 +1234,7 @@ function JobInspector({ job }: { job: AgentJob }) {
                 <div key={`${event.kind}-${event.line}-${index}`} className="bg-surface-secondary border border-border-subtle rounded px-2.5 py-1.5 text-xs">
                   <span className="font-semibold text-gray-700">{event.kind}</span>
                   <span className="text-gray-400 mx-1.5">line {event.line}</span>
-                  <span className="text-gray-600">{event.text}</span>
+                  <span className="text-gray-600 whitespace-pre-wrap break-words">{unescapeLog(event.text)}</span>
                 </div>
               ))}
               {events.length === 0 && <EmptyState>No markers detected yet.</EmptyState>}
@@ -1096,11 +1269,50 @@ function PageHeader({ title, action }: { title: string; action?: ReactNode }) {
   );
 }
 
-function StepNumber({ n }: { n: number }) {
+function NextActionBar({ text }: { text: string }) {
   return (
-    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-gray-900 text-white text-xs font-semibold shrink-0">
-      {n}
+    <div className="sticky top-0 z-10 flex items-center gap-2 bg-attention-subtle border border-attention-muted rounded-md px-3 py-2 text-sm shadow-sm" aria-live="polite">
+      <ChevronRight size={14} className="text-attention-fg shrink-0" />
+      <span className="text-attention-fg font-medium">{text}</span>
+    </div>
+  );
+}
+
+function stepStateClasses(state: StepState) {
+  if (state === 'done') return 'bg-success-emphasis text-white';
+  if (state === 'active') return 'bg-gray-900 text-white ring-2 ring-accent-fg/40';
+  if (state === 'blocked') return 'bg-surface-tertiary text-gray-400';
+  return 'bg-gray-900 text-white';
+}
+
+function StepNumber({ n, state }: { n: number; state: StepState }) {
+  return (
+    <span className={cn('inline-flex items-center justify-center w-5 h-5 rounded-full text-xs font-semibold shrink-0', stepStateClasses(state))}>
+      {state === 'done' ? <Check size={12} /> : n}
     </span>
+  );
+}
+
+function StepCard({ n, title, state, active, aside, children }: { n: number; title: string; state: StepState; active?: boolean; aside?: ReactNode; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (active && ref.current && typeof ref.current.scrollIntoView === 'function') {
+      ref.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [active]);
+  return (
+    <div ref={ref}>
+      <Card className={cn('transition-opacity duration-150', state === 'blocked' && 'opacity-60', active && 'ring-1 ring-accent-fg/30')}>
+        <CardHeader>
+          <StepNumber n={n} state={state} />
+          <CardTitle>{title}</CardTitle>
+          {(aside || state === 'blocked') && <div className="flex-1" />}
+          {aside}
+          {state === 'blocked' && !aside && <span className="text-xs text-gray-400">Locked</span>}
+        </CardHeader>
+        {children}
+      </Card>
+    </div>
   );
 }
 
@@ -1117,8 +1329,21 @@ function Notice({ children, variant = 'default' }: { children: ReactNode; varian
   );
 }
 
+function LiveRegion({ children }: { children: ReactNode }) {
+  return <div aria-live="polite" className="space-y-3 empty:hidden">{children}</div>;
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <SectionLabel className="mb-0">{label}</SectionLabel>
+      <div>{children}</div>
+    </div>
+  );
+}
+
 function EmptyState({ children }: { children: ReactNode }) {
-  return <p className="text-sm text-gray-400 py-3 text-center m-0">{children}</p>;
+  return <div className="text-sm text-gray-400 py-3 text-center">{children}</div>;
 }
 
 function SectionLabel({ children, className }: { children: ReactNode; className?: string }) {
@@ -1147,24 +1372,124 @@ function CommandBlock({ value }: { value: string }) {
   );
 }
 
-function LogBlock({ title, path, content, truncated }: { title: string; path?: string; content: string; truncated?: boolean }) {
+function CopyablePath({ label, value }: { label?: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => navigator.clipboard.writeText(value).then(() => {
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }).catch(() => setCopied(false));
   return (
-    <div>
-      <SectionLabel>{title}</SectionLabel>
-      {path && <div className="text-xs font-mono text-gray-400 mb-1.5 truncate">{path}{truncated ? ' (tail shown)' : ''}</div>}
-      <pre className="log-block">{content || 'No content captured yet.'}</pre>
+    <div className="flex items-center gap-2 bg-surface-secondary rounded px-2 py-1.5 text-xs font-mono text-gray-600">
+      {label && <span className="font-sans font-semibold text-gray-500 not-italic shrink-0">{label}</span>}
+      <span className="flex-1 break-all">{value}</span>
+      <button
+        type="button"
+        className="p-1 rounded hover:bg-surface-tertiary transition-colors border-none cursor-pointer text-gray-500"
+        onClick={copy}
+        aria-label={copied ? 'Copied' : `Copy ${label ?? 'path'}`}
+        title={copied ? 'Copied' : 'Copy'}
+      >
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+      </button>
     </div>
   );
 }
 
-function DataTable<T extends object>({ rows, columns }: { rows: T[]; columns: string[] }) {
+function LogViewer({ title, path, content, truncated, autoScroll }: { title: string; path?: string; content: string; truncated?: boolean; autoScroll?: boolean }) {
+  const text = unescapeLog(content);
+  const [open, setOpen] = useState(text.length <= 4000);
+  const [copied, setCopied] = useState(false);
+  const preRef = useRef<HTMLPreElement>(null);
+  const lineCount = text ? text.split('\n').length : 0;
+  useEffect(() => {
+    if (autoScroll && open && preRef.current) {
+      preRef.current.scrollTop = preRef.current.scrollHeight;
+    }
+  }, [text, autoScroll, open]);
+  const copy = () => navigator.clipboard.writeText(text).then(() => {
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }).catch(() => setCopied(false));
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-1.5">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex items-center gap-1 text-xs font-semibold text-gray-500 uppercase tracking-wider border-none bg-transparent cursor-pointer p-0"
+        >
+          <ChevronDown size={12} className={cn('transition-transform', !open && '-rotate-90')} />
+          {title}
+        </button>
+        <span className="text-[11px] text-gray-400">{lineCount} lines{truncated ? ' · tail' : ''}</span>
+        <div className="flex-1" />
+        {text && (
+          <button
+            type="button"
+            onClick={copy}
+            aria-label={copied ? 'Copied' : `Copy ${title.toLowerCase()}`}
+            title={copied ? 'Copied' : 'Copy'}
+            className="p-1 rounded hover:bg-surface-secondary transition-colors border-none bg-transparent cursor-pointer text-gray-500"
+          >
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+          </button>
+        )}
+      </div>
+      {path && <div className="text-xs font-mono text-gray-400 mb-1.5 truncate">{path}{truncated ? ' (tail shown)' : ''}</div>}
+      <pre ref={preRef} className={cn('log-block', !open && 'hidden')}>{text || 'No content captured yet.'}</pre>
+      {!open && (
+        <button type="button" onClick={() => setOpen(true)} className="text-xs text-accent-fg border-none bg-transparent cursor-pointer p-0 hover:underline">
+          Show {lineCount} lines
+        </button>
+      )}
+    </div>
+  );
+}
+
+const COLUMN_LABELS: Record<string, string> = {
+  name: 'Name',
+  version: 'Version',
+  registryDecision: 'Registry decision',
+  supersedesModuleId: 'Supersedes',
+  supersededByModuleId: 'Superseded by',
+  sourceCheckoutPath: 'Checkout path',
+  testStatus: 'Test status',
+  availableInWorkbench: 'In workbench',
+  status: 'Status',
+  specPath: 'Spec path',
+  outputPath: 'Output path',
+  selectedModulesJson: 'Selected modules',
+  role: 'Role',
+  provider: 'Provider',
+  subjectType: 'Subject',
+  subjectId: 'Subject ID',
+  tmuxSessionName: 'tmux session',
+  createdAt: 'Created',
+  finishedAt: 'Finished'
+};
+
+function humanizeColumn(key: string) {
+  if (COLUMN_LABELS[key]) return COLUMN_LABELS[key];
+  const spaced = key
+    .replace(/Json$/, '')
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+const BOOLEAN_COLUMNS = new Set(['availableInWorkbench']);
+
+function DataTable<T extends object>({ rows, columns, empty }: { rows: T[]; columns: string[]; empty?: ReactNode }) {
   return (
     <div className="overflow-auto">
       <table className="w-full text-sm border-collapse">
         <thead>
           <tr className="border-b border-border-subtle bg-surface-secondary">
             {columns.map((c) => (
-              <th key={c} className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">{c}</th>
+              <th key={c} className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">{humanizeColumn(c)}</th>
             ))}
           </tr>
         </thead>
@@ -1174,14 +1499,14 @@ function DataTable<T extends object>({ rows, columns }: { rows: T[]; columns: st
             return (
               <tr key={String(record.id ?? i)} className="border-b border-border-subtle hover:bg-surface-secondary transition-colors duration-75">
                 {columns.map((c) => (
-                  <td key={c} className="px-3 py-2 text-gray-700 whitespace-nowrap overflow-hidden text-ellipsis max-w-[240px]">{formatCell(record[c])}</td>
+                  <td key={c} className="px-3 py-2 text-gray-700 whitespace-nowrap overflow-hidden text-ellipsis max-w-[240px]">{formatCell(record[c], c)}</td>
                 ))}
               </tr>
             );
           })}
         </tbody>
       </table>
-      {rows.length === 0 && <EmptyState>No data.</EmptyState>}
+      {rows.length === 0 && <EmptyState>{empty ?? 'No data.'}</EmptyState>}
     </div>
   );
 }
@@ -1213,6 +1538,32 @@ function PortRow({ port, type, index, total }: { port: Port; type: 'source' | 't
 
 // --- Utilities ---
 
+function relativeTime(value?: string) {
+  if (!value) return '';
+  const then = new Date(value).getTime();
+  if (Number.isNaN(then)) return value;
+  const diff = Date.now() - then;
+  if (diff < 0) return 'just now';
+  const sec = Math.floor(diff / 1000);
+  if (sec < 45) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  return new Date(then).toLocaleDateString();
+}
+
+function unescapeLog(value: string) {
+  if (!value || (value.indexOf('\\n') === -1 && value.indexOf('\\t') === -1 && value.indexOf('\\r') === -1)) return value;
+  return value
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\n')
+    .replace(/\\t/g, '\t');
+}
+
 function tmuxAttachCommand(job: AgentJob) {
   if (job.attachCommand) return job.attachCommand;
   if (!job.tmuxSessionName) return '';
@@ -1225,8 +1576,9 @@ function shellQuote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function formatCell(value: unknown) {
+function formatCell(value: unknown, column?: string) {
   if (value == null) return '';
+  if (column && BOOLEAN_COLUMNS.has(column)) return value ? 'Yes' : 'No';
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
