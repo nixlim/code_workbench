@@ -105,6 +105,40 @@ it('clears previous extraction sessions while keeping the selected session', asy
   await waitFor(() => expect(screen.queryByText('old-paperclip')).not.toBeInTheDocument());
 });
 
+it('surfaces candidates from the latest completed analysis session', async () => {
+  const repo = { id: 'repo_1', name: 'paperclip', sourceType: 'git_url', sourceUri: 'https://example.test/paperclip.git', sourceCheckoutPath: '.sources/paperclip', createdAt: 'now', updatedAt: 'now' };
+  const session = { id: 'sess_1', repositoryId: repo.id, repoName: repo.name, phase: 'awaiting_approval', createdAt: 'now', updatedAt: 'now' };
+  const candidate = {
+    id: 'sess_1.cand.001',
+    sessionId: session.id,
+    repositoryId: repo.id,
+    proposedName: 'telemetry-client',
+    description: 'Reusable telemetry client module.',
+    moduleKind: 'library',
+    targetLanguage: 'TypeScript',
+    confidence: 'high',
+    extractionRisk: 'low',
+    status: 'proposed',
+    registryDecision: 'add'
+  };
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request) => {
+    const path = String(url);
+    const body = path.includes('/api/repositories')
+      ? { items: [repo] }
+      : path.includes('/api/sessions')
+        ? { items: [session] }
+        : path.includes('/api/candidates')
+          ? { items: [candidate] }
+          : { items: [] };
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  expect(await screen.findByText('paperclip analysis succeeded. Review proposed candidates.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Review candidates' })).toBeInTheDocument();
+  expect(screen.getByText('telemetry-client')).toBeInTheDocument();
+  expect(screen.getByText('Reusable telemetry client module.')).toBeInTheDocument();
+});
+
 it('lets users place modules on a composition canvas before intent is entered', async () => {
   vi.mocked(fetch).mockImplementation((url: string | URL | Request) => {
     const path = String(url);
@@ -157,6 +191,35 @@ it('surfaces agent job prompts transcripts metrics and detected events', async (
   expect(screen.getByText('exitCode')).toBeInTheDocument();
   expect(screen.getByText('134')).toBeInTheDocument();
   expect(screen.getByText('manifest.json')).toBeInTheDocument();
+});
+
+it('shows a copyable tmux command when inspecting a job with a tmux session', async () => {
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request) => {
+    const path = String(url);
+    const job = {
+      id: 'job_1',
+      role: 'repo_analysis',
+      provider: 'claude_code_tmux',
+      status: 'succeeded',
+      subjectType: 'session',
+      subjectId: 'sess_1',
+      tmuxSessionName: 'code-workbench-job_1',
+      promptPath: '/tmp/job_1/prompt.md',
+      timeoutSeconds: 1800,
+      createdAt: 'now'
+    };
+    const body = path.endsWith('/api/agent-jobs/job_1')
+      ? job
+      : path.includes('/api/agent-jobs')
+        ? { items: [job] }
+        : { items: [] };
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  fireEvent.click(screen.getAllByText('Agent Jobs')[0]);
+  fireEvent.click(await screen.findByText('Inspect'));
+  expect(await screen.findByText("tmux -S '/tmp/job_1/tmux.sock' attach -t 'code-workbench-job_1'")).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Copy tmux command' })).toBeInTheDocument();
 });
 
 it('copies the tmux attach command from an agent job', async () => {

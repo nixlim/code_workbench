@@ -17,6 +17,15 @@ const screens: Array<{ id: Screen; label: string; icon: React.ComponentType<{ si
   { id: 'jobs', label: 'Agent Jobs', icon: PlaySquare }
 ];
 
+const candidateReviewPhases = new Set(['awaiting_approval', 'candidates_ready']);
+const analysisRunningPhases = new Set(['queued', 'analysing']);
+const hasReviewableCandidates = (item: Session) => candidateReviewPhases.has(item.phase);
+const isAnalysisRunning = (item: Session) => analysisRunningPhases.has(item.phase);
+const sessionNotice = (item: Session) => hasReviewableCandidates(item)
+  ? `${item.repoName} analysis succeeded. Review proposed candidates.`
+  : `Extraction session ${item.id} is ${item.phase}.`;
+const sessionActionLabel = (item: Session) => hasReviewableCandidates(item) ? 'Review candidates' : 'Continue';
+
 export function App() {
   const [screen, setScreenState] = useState<Screen>(() => {
     const saved = window.localStorage.getItem('code-workbench:screen');
@@ -79,7 +88,9 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
   const rescanLabel = sourceUri.trim() ? 'Rescan source' : repo ? `Rescan ${repo.name}` : 'Rescan source';
   const sourceNeedsRefresh = Boolean(repo && !session && !pendingSessionId && repo.id !== refreshedRepoId);
   const nextAction = repo
-    ? pendingSessionId
+    ? session && hasReviewableCandidates(session)
+      ? `Review proposed extraction candidates for ${session.repoName}.`
+      : pendingSessionId
       ? `Continue the extraction session for ${repo.name}.`
       : intent.trim()
       ? `Start candidate scan for ${repo.name}.`
@@ -88,17 +99,63 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
         : `Describe what reusable functionality to extract, then start candidate scan for ${repo.name}.`
     : 'Import a repository or choose a registered source.';
 
-  const loadRepositories = () => api.list<Repository>('/api/repositories').then((r) => setRepositories(r.items)).catch((e) => onError(e.message));
-  const loadSessions = () => api.list<Session>('/api/sessions').then((r) => setSessions(r.items)).catch((e) => onError(e.message));
-  useEffect(() => {
-    void loadRepositories();
-    void loadSessions();
-  }, []);
-
+  const loadRepositories = () => api.list<Repository>('/api/repositories').then((r) => {
+    setRepositories(r.items);
+    return r.items;
+  }).catch((e) => {
+    onError(e.message);
+    return [];
+  });
   const loadCandidates = (sessionId = session?.id) => {
     if (!sessionId) return Promise.resolve();
     return api.list<Candidate>(`/api/candidates?sessionId=${encodeURIComponent(sessionId)}`).then((r) => setCandidates(r.items)).catch((e) => onError(e.message));
   };
+  const activateSession = (item: Session, repoList = repositories) => {
+    setSession(item);
+    setPendingSessionId('');
+    setRepo(repoList.find((r) => r.id === item.repositoryId) ?? repo);
+    setActiveSessionNotice(sessionNotice(item));
+    void loadCandidates(item.id);
+  };
+  const loadSessions = (repoList = repositories, autoActivate = false) => api.list<Session>('/api/sessions').then((r) => {
+    setSessions(r.items);
+    const current = session ? r.items.find((item) => item.id === session.id) : undefined;
+    if (current && current.phase !== session?.phase) {
+      setSession(current);
+      setActiveSessionNotice(sessionNotice(current));
+      if (hasReviewableCandidates(current)) {
+        void loadCandidates(current.id);
+      }
+    }
+    if (autoActivate && !session && !pendingSessionId) {
+      const reviewable = r.items.find(hasReviewableCandidates);
+      if (reviewable) {
+        activateSession(reviewable, repoList);
+      }
+    }
+    return r.items;
+  }).catch((e) => {
+    onError(e.message);
+    return [];
+  });
+  useEffect(() => {
+    void Promise.all([api.list<Repository>('/api/repositories'), api.list<Session>('/api/sessions')]).then(([repoList, sessionList]) => {
+      setRepositories(repoList.items);
+      setSessions(sessionList.items);
+      const reviewable = sessionList.items.find(hasReviewableCandidates);
+      if (reviewable) {
+        activateSession(reviewable, repoList.items);
+      }
+    }).catch((e) => onError(e.message));
+  }, []);
+  useEffect(() => {
+    if (!session || !isAnalysisRunning(session)) return;
+    const timer = window.setInterval(() => {
+      void loadSessions(repositories, true);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [session?.id, session?.phase, repositories]);
+
   const startSession = async (target: Repository, refreshed = false, activate = true) => {
     setSourceType(target.sourceType);
     setSourceUri(target.sourceUri);
@@ -193,7 +250,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
     const updated = await api.post<Session>(`/api/sessions/${session.id}/intent`, { specificFunctionality: intent, allowAgentDiscovery: true, expectedUpdatedAt: session.updatedAt });
     setSession(updated);
     await api.post<AgentJob>(`/api/sessions/${session.id}/analysis-jobs`, {});
-    await loadSessions();
+    await loadSessions(repositories, true);
   };
   const clearPreviousSessions = async () => {
     const query = session?.id ? `?keepSessionId=${encodeURIComponent(session.id)}` : '';
@@ -203,14 +260,10 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
     } else {
       setMessage('No previous extraction sessions could be cleared.');
     }
-    await loadSessions();
+    await loadSessions(repositories, true);
   };
   const continueSession = (item: Session) => {
-    setSession(item);
-    setPendingSessionId('');
-    setRepo(repositories.find((r) => r.id === item.repositoryId) ?? repo);
-    setActiveSessionNotice(`Extraction session ${item.id} is ${item.phase}.`);
-    void loadCandidates(item.id);
+    activateSession(item);
   };
   const decide = (candidate: Candidate, action: 'approve' | 'reject' | 'defer' | 'rescan') => {
     void api.post<Candidate>(`/api/candidates/${candidate.id}/${action}`, { reason }).then(() => loadCandidates(candidate.sessionId)).catch((e) => onError(e.message));
@@ -234,7 +287,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
             <input value={sourceUri} onChange={(e) => setSourceUri(e.target.value)} placeholder="Repository path or URL" />
             <button disabled={Boolean(busyAction)} onClick={() => begin().catch((e) => onError(e.message))}>Import to .sources</button>
             <button disabled={Boolean(busyAction)} className={sourceNeedsRefresh && !intent.trim() ? 'next-action-button' : ''} onClick={() => rescan().catch((e) => onError(e.message))}>{rescanLabel}</button>
-            <button onClick={() => { void loadRepositories(); void loadSessions(); }} aria-label="Refresh registered sources"><RefreshCw size={16} /></button>
+            <button onClick={() => { void loadRepositories().then((repoList) => loadSessions(repoList, true)); }} aria-label="Refresh registered sources"><RefreshCw size={16} /></button>
           </div>
           <div className="next-action"><strong>Next action</strong><span>{nextAction}</span></div>
           {busyAction && <div className="notice progress-notice">{busyAction}</div>}
@@ -269,7 +322,7 @@ function RegistryExtractionWizard({ onError }: { onError: (value: string) => voi
                   <article className={session?.id === item.id || pendingSessionId === item.id ? 'row-card selected' : 'row-card'} key={item.id}>
                     <strong>{item.repoName}</strong>
                     <span>{item.phase}</span>
-                    <button className={pendingSessionId === item.id ? 'next-action-button' : ''} onClick={() => continueSession(item)}>Continue</button>
+                    <button className={pendingSessionId === item.id || hasReviewableCandidates(item) ? 'next-action-button' : ''} onClick={() => continueSession(item)}>{sessionActionLabel(item)}</button>
                   </article>
                 ))}
                 {sessions.length === 0 && <div className="notice">No extraction sessions.</div>}
@@ -554,14 +607,15 @@ function JobInspector({ job }: { job: AgentJob }) {
   const events = [...(job.transcript?.events ?? []), ...(job.activityLog?.events ?? [])];
   const files = job.outputFiles ?? [];
   const hasFailureDetail = job.errorCode || job.exitCode !== undefined;
+  const attachCommand = tmuxAttachCommand(job);
   return (
     <section className="panel job-inspector">
       <h3>{job.role} {job.status}</h3>
-      {(job.attachCommand || job.tmuxSessionName) && (
+      {(attachCommand || job.tmuxSessionName) && (
         <section className="job-session-panel">
-          <h4>Live session</h4>
+          <h4>{job.status === 'running' ? 'Live session' : 'tmux session'}</h4>
           {job.tmuxSessionName && <div className="path-line">{job.tmuxSessionName}</div>}
-          {job.attachCommand && <CommandBlock value={job.attachCommand} />}
+          {attachCommand && <CommandBlock value={attachCommand} />}
         </section>
       )}
       {hasFailureDetail && (
@@ -597,6 +651,18 @@ function JobInspector({ job }: { job: AgentJob }) {
       </div>
     </section>
   );
+}
+
+function tmuxAttachCommand(job: AgentJob) {
+  if (job.attachCommand) return job.attachCommand;
+  if (!job.tmuxSessionName) return '';
+  const socketPath = job.promptPath ? `${job.promptPath.replace(/\/[^/]*$/, '')}/tmux.sock` : '';
+  if (!socketPath) return `tmux attach -t ${shellQuote(job.tmuxSessionName)}`;
+  return `tmux -S ${shellQuote(socketPath)} attach -t ${shellQuote(job.tmuxSessionName)}`;
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function CommandBlock({ value }: { value: string }) {
