@@ -1,5 +1,5 @@
 import ReactFlow, { Background, Controls, Handle, Position, addEdge, useEdgesState, useNodesState, type Connection, type NodeProps } from 'reactflow';
-import { Boxes, FileText, GitBranch, PlaySquare, Plus, RefreshCw, Trash2, WandSparkles } from 'lucide-react';
+import { Boxes, Check, Copy, FileText, GitBranch, PlaySquare, Plus, RefreshCw, Trash2, WandSparkles } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { AgentJob, Candidate, Composition, ModuleRecord, Repository, Session, SessionCleanupResult, SpecEnrichment } from '../api/generated/types';
@@ -608,7 +608,15 @@ function CommandBlock({ value }: { value: string }) {
   return (
     <div className="command-block">
       <code>{value}</code>
-      <button onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+      <button
+        type="button"
+        className="command-copy-button"
+        onClick={copy}
+        aria-label={copied ? 'Copied tmux command' : 'Copy tmux command'}
+        title={copied ? 'Copied tmux command' : 'Copy tmux command'}
+      >
+        {copied ? <Check size={16} aria-hidden="true" /> : <Copy size={16} aria-hidden="true" />}
+      </button>
     </div>
   );
 }

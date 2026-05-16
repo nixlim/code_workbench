@@ -158,3 +158,43 @@ it('surfaces agent job prompts transcripts metrics and detected events', async (
   expect(screen.getByText('134')).toBeInTheDocument();
   expect(screen.getByText('manifest.json')).toBeInTheDocument();
 });
+
+it('copies the tmux attach command from an agent job', async () => {
+  const writeText = vi.fn(() => Promise.resolve());
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText }
+  });
+  const command = 'tmux -S /tmp/job_1/tmux.sock attach -t code-workbench-job_1';
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+    const path = String(url);
+    const job = {
+      id: 'job_1',
+      role: 'wiring',
+      provider: 'claude_code_tmux',
+      status: 'running',
+      subjectType: 'blueprint',
+      subjectId: 'bp_1',
+      tmuxSessionName: 'code-workbench-job_1',
+      promptPath: '/tmp/job_1/prompt.md',
+      timeoutSeconds: 3600,
+      createdAt: 'now'
+    };
+    if (path.endsWith('/api/agent-jobs/job_1/open') && init?.method === 'POST') {
+      return Promise.resolve(new Response(JSON.stringify({ tmuxSessionName: job.tmuxSessionName, attachCommand: command }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    }
+    const body = path.endsWith('/api/agent-jobs/job_1')
+      ? job
+      : path.includes('/api/agent-jobs')
+        ? { items: [job] }
+        : { items: [] };
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  fireEvent.click(screen.getAllByText('Agent Jobs')[0]);
+  fireEvent.click(await screen.findByText('Open'));
+  expect(await screen.findAllByText(command)).toHaveLength(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Copy tmux command' }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(command));
+  expect(await screen.findByRole('button', { name: 'Copied tmux command' })).toBeInTheDocument();
+});
