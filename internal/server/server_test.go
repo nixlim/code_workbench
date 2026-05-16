@@ -168,6 +168,10 @@ func TestRepositorySessionCandidateExtractionSmoke(t *testing.T) {
 	if code != 200 || approved["status"] != "approved" {
 		t.Fatalf("approve status=%d body=%v", code, approved)
 	}
+	code, configured := doJSON(t, app, http.MethodPatch, "/api/candidates/"+candidate["id"].(string), map[string]any{"targetLanguage": "go"})
+	if code != 200 || configured["status"] != "approved" || configured["targetLanguage"] != "go" {
+		t.Fatalf("target language patch status=%d body=%v", code, configured)
+	}
 	code, plan := doJSON(t, app, http.MethodPost, "/api/extraction-plans", map[string]any{"sessionId": sessionID, "approvedCandidateIds": []string{candidate["id"].(string)}, "rejectedCandidateIds": []string{"old"}})
 	if code != 201 || plan["status"] != "ready" {
 		t.Fatalf("plan status=%d body=%v", code, plan)

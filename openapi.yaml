@@ -188,7 +188,7 @@ components:
     CreateRepository: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [sourceType, sourceUri], properties: {name: {type: string}, sourceType: {enum: [local_path, git_url]}, sourceUri: {type: string}, defaultBranch: {type: string}, rescan: {type: boolean}}}}}}
     CreateSession: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [repositoryId], properties: {repositoryId: {type: string}}}}}}
     SessionIntent: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionIntent'}}}}
-    PatchCandidate: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {proposedName: {type: string}, description: {type: string}, moduleKind: {type: string}}}}}}
+    PatchCandidate: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {proposedName: {type: string}, description: {type: string}, moduleKind: {type: string}, targetLanguage: {type: string, default: go}}}}}}
     Reason: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [reason], properties: {reason: {type: string, minLength: 3}, duplicateModuleId: {type: string}}}}}}
     OptionalReason: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {reason: {type: string}, duplicateModuleId: {type: string}}}}}}
     Provider: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {provider: {type: string, enum: [claude_code_tmux, fake]}}}}}}

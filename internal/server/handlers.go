@@ -395,9 +395,10 @@ func (a *App) handleListCandidates(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handlePatchCandidate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProposedName string `json:"proposedName"`
-		Description  string `json:"description"`
-		ModuleKind   string `json:"moduleKind"`
+		ProposedName   string `json:"proposedName"`
+		Description    string `json:"description"`
+		ModuleKind     string `json:"moduleKind"`
+		TargetLanguage string `json:"targetLanguage"`
 	}
 	if err := decodeStrict(r, &req); err != nil {
 		writeErr(w, err)
@@ -409,11 +410,18 @@ func (a *App) handlePatchCandidate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, APIError{Status: 404, Code: "resource.not_found", Message: "candidate not found"})
 		return
 	}
-	if status != "proposed" && status != "deferred" {
+	if status != "proposed" && status != "modified" && status != "deferred" && status != "approved" && status != "extraction_planned" {
 		writeErr(w, APIError{Status: 409, Code: "candidate.invalid_transition", Message: "candidate cannot be modified from current status"})
 		return
 	}
-	_, err := a.store.DB.Exec(`UPDATE candidates SET proposed_name=COALESCE(NULLIF(?,''),proposed_name), description=COALESCE(NULLIF(?,''),description), module_kind=COALESCE(NULLIF(?,''),module_kind), status='modified', updated_at=? WHERE id=?`, req.ProposedName, req.Description, req.ModuleKind, now(), id)
+	if strings.TrimSpace(req.TargetLanguage) == "" {
+		req.TargetLanguage = ""
+	}
+	nextStatus := status
+	if status == "proposed" || status == "deferred" {
+		nextStatus = "modified"
+	}
+	_, err := a.store.DB.Exec(`UPDATE candidates SET proposed_name=COALESCE(NULLIF(?,''),proposed_name), description=COALESCE(NULLIF(?,''),description), module_kind=COALESCE(NULLIF(?,''),module_kind), target_language=COALESCE(NULLIF(?,''),target_language), status=?, updated_at=? WHERE id=?`, req.ProposedName, req.Description, req.ModuleKind, strings.TrimSpace(req.TargetLanguage), nextStatus, now(), id)
 	if err != nil {
 		writeErr(w, err)
 		return

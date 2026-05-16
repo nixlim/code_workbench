@@ -18,28 +18,28 @@ afterEach(() => {
 
 it('renders all primary screens without authentication', async () => {
   render(<App />);
-  expect(screen.getAllByText('Registry & Code Extraction').length).toBeGreaterThan(0);
+  expect(screen.getByText('Registry & Code Extraction')).toBeInTheDocument();
   expect(screen.getByText('Spec Enrichment')).toBeInTheDocument();
-  expect(screen.getByText('Freeform Composition')).toBeInTheDocument();
+  expect(screen.getByText('Composition')).toBeInTheDocument();
   expect(screen.getByText('Modules')).toBeInTheDocument();
   expect(screen.getByText('Agent Jobs')).toBeInTheDocument();
 });
 
 it('blocks registry extraction until a candidate is approved', () => {
   render(<App />);
-  expect(screen.getByText('Create extraction plan')).toBeDisabled();
+  expect(screen.getByText('Configure extraction job')).toBeDisabled();
 });
 
 it('does not show popup click feedback when enabled buttons are pressed', () => {
   render(<App />);
-  fireEvent.click(screen.getAllByText('Spec Enrichment')[0]);
+  fireEvent.click(screen.getByText('Spec Enrichment'));
   expect(screen.queryByRole('status')).not.toBeInTheDocument();
   expect(screen.getByRole('heading', { name: 'Spec Enrichment' })).toBeInTheDocument();
 });
 
 it('blocks composition compile before clarification answers are saved', () => {
   render(<App />);
-  fireEvent.click(screen.getAllByText('Freeform Composition')[0]);
+  fireEvent.click(screen.getByText('Composition'));
   expect(screen.getByText('Compile blueprint and spec')).toBeDisabled();
 });
 
@@ -75,9 +75,9 @@ it('highlights continue after using a registered source for extraction', async (
   render(<App />);
   fireEvent.click(await screen.findByText('Use for extraction'));
   expect(await screen.findByText('Continue the extraction session for existing-repo.')).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Continue' })).toHaveClass('next-action-button');
-  expect(screen.getByRole('button', { name: 'Rescan source' })).not.toHaveClass('next-action-button');
-  fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+  const continueBtn = screen.getByRole('button', { name: 'Continue' });
+  expect(continueBtn.className).toContain('attention');
+  fireEvent.click(continueBtn);
   expect(await screen.findByText('Describe what reusable functionality to extract, then start candidate scan for existing-repo.')).toBeInTheDocument();
 });
 
@@ -100,7 +100,7 @@ it('clears previous extraction sessions while keeping the selected session', asy
   render(<App />);
   expect(await screen.findByText('old-paperclip')).toBeInTheDocument();
   fireEvent.click(screen.getAllByText('Continue')[0]);
-  fireEvent.click(screen.getByText('Clear previous sessions'));
+  fireEvent.click(screen.getByText('Clear'));
   expect(await screen.findByText('Cleared 1 previous extraction session.')).toBeInTheDocument();
   await waitFor(() => expect(screen.queryByText('old-paperclip')).not.toBeInTheDocument());
 });
@@ -139,6 +139,56 @@ it('surfaces candidates from the latest completed analysis session', async () =>
   expect(screen.getByText('Reusable telemetry client module.')).toBeInTheDocument();
 });
 
+it('configures target output language before creating an extraction plan', async () => {
+  const repo = { id: 'repo_1', name: 'paperclip', sourceType: 'git_url', sourceUri: 'https://example.test/paperclip.git', sourceCheckoutPath: '.sources/paperclip', createdAt: 'now', updatedAt: 'now' };
+  const session = { id: 'sess_1', repositoryId: repo.id, repoName: repo.name, phase: 'awaiting_approval', createdAt: 'now', updatedAt: 'now' };
+  const candidate = {
+    id: 'sess_1.cand.001',
+    sessionId: session.id,
+    repositoryId: repo.id,
+    proposedName: 'telemetry-client',
+    description: 'Reusable telemetry client module.',
+    moduleKind: 'library',
+    targetLanguage: 'TypeScript',
+    confidence: 'high',
+    extractionRisk: 'low',
+    status: 'approved',
+    registryDecision: 'add'
+  };
+  const patchBodies: unknown[] = [];
+  let planBody: unknown;
+  vi.mocked(fetch).mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+    const path = String(url);
+    if (path.includes('/api/candidates/') && init?.method === 'PATCH') {
+      patchBodies.push(JSON.parse(String(init.body)));
+      return Promise.resolve(new Response(JSON.stringify({ ...candidate, targetLanguage: 'go' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    }
+    if (path.endsWith('/api/extraction-plans') && init?.method === 'POST') {
+      planBody = JSON.parse(String(init.body));
+      return Promise.resolve(new Response(JSON.stringify({ id: 'plan_1' }), { status: 201, headers: { 'content-type': 'application/json' } }));
+    }
+    const body = path.includes('/api/repositories')
+      ? { items: [repo] }
+      : path.includes('/api/sessions')
+        ? { items: [session] }
+        : path.includes('/api/candidates')
+          ? { items: [candidate] }
+          : { items: [] };
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  render(<App />);
+  expect(await screen.findByText('telemetry-client')).toBeInTheDocument();
+  expect(screen.getByText('Agent language hint')).toBeInTheDocument();
+  fireEvent.click(screen.getByText('Configure extraction job'));
+  expect(await screen.findByRole('dialog', { name: 'Configure extraction job' })).toBeInTheDocument();
+  expect(screen.getByLabelText('Default output language')).toHaveValue('go');
+  expect(screen.getByLabelText('telemetry-client output language')).toHaveValue('go');
+  fireEvent.click(screen.getByText('Save configuration and create plan'));
+  await waitFor(() => expect(patchBodies).toEqual([{ targetLanguage: 'go' }]));
+  expect(planBody).toMatchObject({ sessionId: 'sess_1', approvedCandidateIds: ['sess_1.cand.001'] });
+  expect(await screen.findByText('Extraction plan plan_1 configured for Go output.')).toBeInTheDocument();
+});
+
 it('lets users place modules on a composition canvas before intent is entered', async () => {
   vi.mocked(fetch).mockImplementation((url: string | URL | Request) => {
     const path = String(url);
@@ -148,7 +198,7 @@ it('lets users place modules on a composition canvas before intent is entered', 
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
   render(<App />);
-  fireEvent.click(screen.getAllByText('Freeform Composition')[0]);
+  fireEvent.click(screen.getByText('Composition'));
   fireEvent.click(await screen.findByText('registry-helper'));
   expect(screen.getByLabelText('Composition canvas')).toBeInTheDocument();
   expect(screen.getByText('registry-helper@0.1.0')).toBeInTheDocument();
@@ -181,7 +231,7 @@ it('surfaces agent job prompts transcripts metrics and detected events', async (
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
   render(<App />);
-  fireEvent.click(screen.getAllByText('Agent Jobs')[0]);
+  fireEvent.click(screen.getByText('Agent Jobs'));
   fireEvent.click(await screen.findByText('Inspect'));
   expect(await screen.findByText('Extract paperclip module')).toBeInTheDocument();
   expect(screen.getAllByText('Do you want to continue?').length).toBeGreaterThan(0);
@@ -216,10 +266,10 @@ it('shows a copyable tmux command when inspecting a job with a tmux session', as
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
   render(<App />);
-  fireEvent.click(screen.getAllByText('Agent Jobs')[0]);
+  fireEvent.click(screen.getByText('Agent Jobs'));
   fireEvent.click(await screen.findByText('Inspect'));
   expect(await screen.findByText("tmux -S '/tmp/job_1/tmux.sock' attach -t 'code-workbench-job_1'")).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Copy tmux command' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Copy command' })).toBeInTheDocument();
 });
 
 it('copies the tmux attach command from an agent job', async () => {
@@ -254,10 +304,11 @@ it('copies the tmux attach command from an agent job', async () => {
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
   render(<App />);
-  fireEvent.click(screen.getAllByText('Agent Jobs')[0]);
+  fireEvent.click(screen.getByText('Agent Jobs'));
   fireEvent.click(await screen.findByText('Open'));
   expect(await screen.findAllByText(command)).toHaveLength(2);
-  fireEvent.click(screen.getByRole('button', { name: 'Copy tmux command' }));
+  const copyButtons = screen.getAllByRole('button', { name: 'Copy command' });
+  fireEvent.click(copyButtons[0]);
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(command));
-  expect(await screen.findByRole('button', { name: 'Copied tmux command' })).toBeInTheDocument();
+  expect(await screen.findAllByRole('button', { name: 'Copied' })).toHaveLength(1);
 });

@@ -1,4 +1,4 @@
-// Generated from openapi.yaml sha256:06b946892248b99773be49d988d3bd43def64bf6da506a26f4d1a3d04c715231
+// Generated from openapi.yaml sha256:993ec747689d7592f534bc6fabe3c762fb6b6b10d2a07b8a3d0633cb5da4db0c
 export type APIRecord = Record<string, unknown>;
 
 export interface ListEnvelope<T = APIRecord> {
@@ -36,6 +36,8 @@ export interface Candidate {
   repositoryId: string;
   proposedName: string;
   description: string;
+  moduleKind: string;
+  targetLanguage: string;
   status: string;
   extractionRisk: string;
   confidence: string;
